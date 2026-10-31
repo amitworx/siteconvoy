@@ -9,8 +9,8 @@ SiteConvoy takes security and data integrity seriously. Because multisite migrat
 If you discover a security vulnerability in SiteConvoy, please report it responsibly:
 
 - **Do NOT file public GitHub issues** for suspected security vulnerabilities.
-- Please use [GitHub Private Vulnerability Reporting](https://github.com/amitworx/siteconvoy/security/advisories/new) on the repository.
-- Alternatively, report security findings to the repository maintainer through verified GitHub profile channels.
+- For private security disclosures, please report vulnerabilities directly to the repository maintainer through verified GitHub profile channels or maintainer contact information.
+- *Note regarding GitHub Private Vulnerability Reporting*: While GitHub provides an advisory submission endpoint, private vulnerability reporting is currently **disabled or unverified** on this repository. Do not rely on private advisories until officially enabled and announced.
 
 When reporting a vulnerability, please include:
 - A clear description of the vulnerability and its potential impact.

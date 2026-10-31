@@ -15,7 +15,7 @@ WordPress Multisite migrations are notoriously complex due to shared database ta
 SiteConvoy is being designed to provide reliable, verifiable, and transparent migration workflows covering all four core directions without artificial paywalls or arbitrary file-size limitations:
 
 1. **Multisite Subsite &rarr; Standalone WordPress**: Extract an individual subsite into a self-contained, independent single-site WordPress install. This includes first-class support and careful handling for the network's **main site (Site ID 1)**.
-2. **Multisite Subsite &rarr; Another Multisite Network**: Transfer a subsite from one network into an existing target network, handling table prefix rewrites, user ID collisions, and network-specific media locations.
+2. **Multisite Subsite &rarr; Another Multisite Network**: Transfer a subsite from one network into an existing target network, handling table prefix rewrites, user collision reviews, and network-specific media locations.
 3. **Full Multisite Network &rarr; New Environment / Domain**: Package and migrate an entire network (all sites, network options, shared users, and uploads) across domains, hosts, or server environments.
 4. **Standalone WordPress &rarr; Multisite Subsite**: Import an independent standalone WordPress site into an existing multisite network as a new subsite.
 
@@ -25,8 +25,8 @@ SiteConvoy is being designed to provide reliable, verifiable, and transparent mi
 
 - **True Open Source**: Licensed under GPL-2.0-or-later, matching WordPress core.
 - **No Artificial Gating**: No vendor lock-in, commercial feature paywalls, or arbitrary migration size limits.
-- **Security by Design**: Explicit preflight checks, cryptographic integrity verification, atomic restoration steps, safe rollback mechanisms, and strict permission verification.
-- **Test-Driven Reliability**: Full reproducible verification using real multisite fixtures, automated test suites, and transparent failure reporting.
+- **Security by Design**: Explicit preflight checks, cryptographic integrity verification, cautious identity resolution (no silent account merging), backup checkpoints, and strict permission verification.
+- **Test-Driven Reliability**: Full reproducible verification using real multisite fixtures, automated test suites, staged operations with best-effort compensating rollback, and transparent failure reporting.
 
 ---
 

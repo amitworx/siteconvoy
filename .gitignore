@@ -9,18 +9,20 @@ Thumbs.db
 *.swo
 *~
 
-# Build and Dependency Artifacts
+# Dependency and Temporary Development Artifacts
 vendor/
 node_modules/
-dist/
-build/
 *.log
 
-# Migration and Temporary Files
+# Build Outputs (Packaging Note: WordPress plugin release ZIPs/assets must not be obscured)
+# Specific build cache directories may be ignored, but ensure plugin release distributions are retained if tracked
+build-cache/
+tmp/
+
+# Migration and Archive Files
 *.tar.gz
 *.zip
 *.sql
 *.sql.gz
-tmp/
 backups/
 siteconvoy-exports/

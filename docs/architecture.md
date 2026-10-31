@@ -2,7 +2,7 @@
 
 > [!NOTE]
 > **Status: PROPOSED / UNVALIDATED DESIGN**  
-> The architectural models and technical designs described in this document represent the planned design for SiteConvoy version 1.0. They have not yet been validated by executable implementations or integration tests. All items are subject to refinement during upcoming development milestones.
+> The architectural models and technical designs described in this document represent the planned design for SiteConvoy version 1.0. They have not yet been validated by executable implementations or integration tests. All items are design goals subject to empirical refinement and testing during upcoming development milestones.
 
 ---
 
@@ -14,11 +14,12 @@ SiteConvoy is structured around a pipeline of modular, isolated subsystems:
 +-----------------------------------------------------------------------------------+
 |                                 SiteConvoy Engine                                 |
 +-----------------------------------------------------------------------------------+
-|  1. Preflight & Discovery  --> Scan environment, disk space, limits, collision   |
-|  2. Archive Packaging      --> Chunked extraction, streaming compression, SHA256  |
-|  3. Transform Engine       --> Table prefix rewrite, user remapping, serialization|
-|  4. Filesystem Manager     --> Media translocation, atomic stage-and-swap         |
-|  5. Verification & Rollback--> Cryptographic checksum, integrity test, undo log  |
+|  1. Preflight & Discovery  --> Scan environment, disk space, limits, collisions   |
+|  2. Backup & Checkpointing --> Establish restore points, journal stage state      |
+|  3. Archive Packaging      --> Chunked extraction, streaming compression, SHA256  |
+|  4. Transform Engine       --> Table prefix rewrite, user review, serialization   |
+|  5. Filesystem Manager     --> Media translocation, staged copy & atomic rename   |
+|  6. Recovery & Rollback    --> Best-effort compensation, journaled manual recovery|
 +-----------------------------------------------------------------------------------+
 ```
 
@@ -33,7 +34,7 @@ SiteConvoy is structured around a pipeline of modular, isolated subsystems:
   - When importing standalone to subsite, `wp_*` tables must be converted to `wp_{new_id}_*`.
 - **Risks & Mitigation**:
   - *Risk*: Blind regex replacements on table prefixes can corrupt custom tables or column names containing similar strings.
-  - *Mitigation*: Tables must be discovered through dynamic schema inspection (`SHOW TABLES LIKE...`), isolated individually, and renamed with strict boundaries.
+  - *Mitigation*: Tables must be discovered through dynamic schema inspection (`SHOW TABLES LIKE...`), isolated individually, and renamed with strict boundary delimiters.
 
 ### 2. Main Site (Site ID 1) Extraction
 - **Design**:
@@ -42,14 +43,19 @@ SiteConvoy is structured around a pipeline of modular, isolated subsystems:
   - *Risk*: Attempting to extract Site ID 1 by taking all `wp_*` tables will inadvertently export global multisite metadata, polluting the standalone target with irrelevant network state.
   - *Mitigation*: Explicit table inclusion lists separating subsite tables from global network tables. Option filtering to drop network-specific option keys (e.g., `active_sitewide_plugins`, `site_admins`).
 
-### 3. Shared Users and Role Remapping
+### 3. Shared Users, Identity Resolution & Permission Safety
 - **Design**:
   - In multisite, `wp_users` is shared across all sites. User capabilities and roles are stored in `wp_usermeta` under site-specific meta keys (`wp_capabilities` for site 1, `wp_{id}_capabilities` for subsite `id`).
 - **Risks & Mitigation**:
-  - *Risk (Subsite to Standalone)*: Copying all network users leaks accounts that have no relationship to the subsite.
-  - *Mitigation*: Only users with explicit roles or authorship records on the migrated site will be extracted. Usermeta keys `wp_{id}_capabilities` and `wp_{id}_user_level` must be rewritten to `wp_capabilities` and `wp_user_level`.
-  - *Risk (Subsite to Target Multisite)*: ID collisions where User ID 5 on the source site represents a different person than User ID 5 on the target network.
-  - *Mitigation*: User resolution strategy: Match by verified `user_email` or `user_login` if identical; otherwise generate a new user record and remap `post_author` and associated IDs throughout all migrated site tables.
+  - *Risk (Subsite to Standalone User Leakage)*: Copying all network users leaks accounts that have no relationship to the subsite.
+    - *Mitigation*: Only users with explicit roles or authorship records on the migrated site will be extracted. Usermeta keys `wp_{id}_capabilities` and `wp_{id}_user_level` must be rewritten to `wp_capabilities` and `wp_user_level`.
+  - *Risk (Insecure Account Linking & Privilege Escalation)*: Inferring account identity from matching emails or logins alone is dangerous; an attacker could craft an export containing an administrator's email to hijack an account on the target network, or an import could silently grant unintended privileges.
+    - *Mitigation*:
+      - **No silent linking**: Never automatically merge or associate users based on email or username match alone.
+      - **No imported super-admins**: Never grant network-level super-administrator (`manage_network`) capabilities via imported archives.
+      - **Explicit admin approval**: Flag all email/login collisions in preflight review and require explicit confirmation by a trusted administrator on the target system.
+      - **Account creation & remapping**: When accounts are distinct, generate new non-colliding accounts and remap all `post_author`, revision, and meta references.
+      - **Unresolved edge cases**: Maintain open test requirements for handling orphaned author references, custom user taxonomy terms, and multi-network cross-table user capabilities.
 
 ### 4. Serialized Data and Deep Search-and-Replace
 - **Design**:
@@ -57,6 +63,8 @@ SiteConvoy is structured around a pipeline of modular, isolated subsystems:
 - **Risks & Mitigation**:
   - *Risk*: Direct SQL `REPLACE()` breaks PHP serialized string length counts (e.g., `s:19:"http://old-site.com"` becoming invalid when changed to `http://new-domain.org`), resulting in broken settings and corrupted widgets.
   - *Mitigation*: Use a robust recursive unserialize/replace/reserialize engine that correctly handles multi-byte UTF-8 characters and nested structures.
+  - *Risk*: Modifying GUID values in `wp_posts.guid` breaks external feed readers and syndication identifiers.
+  - *Mitigation*: Explicitly skip `wp_posts.guid` during search-and-replace, following WordPress core and WP-CLI standards (`--skip-columns=guid`).
 
 ### 5. Media Paths and Filesystem Differences
 - **Design**:
@@ -64,7 +72,7 @@ SiteConvoy is structured around a pipeline of modular, isolated subsystems:
   - Multisite subsite upload path: `wp-content/uploads/sites/{id}/YYYY/MM/...` (or legacy `blogs.dir/{id}/files/`).
 - **Risks & Mitigation**:
   - *Risk*: Broken media links in post content and broken database references in `_wp_attached_file`.
-  - *Mitigation*: File translocation must synchronize with database URL replacements and `_wp_attached_file` postmeta adjustments.
+  - *Mitigation*: File translocation must synchronize with database URL replacements and `_wp_attached_file` postmeta adjustments while leaving `wp_posts.guid` unchanged.
 
 ### 6. Network-Activated Plugins and Custom Tables
 - **Design**:
@@ -78,16 +86,18 @@ SiteConvoy is structured around a pipeline of modular, isolated subsystems:
   - Large multisite networks can span tens of gigabytes of media and massive database tables.
 - **Risks & Mitigation**:
   - *Risk*: PHP `max_execution_time` and `memory_limit` exhaustion causing partial exports or incomplete imports.
-  - *Mitigation*: Batch-oriented, chunked processing with persistent execution state and streaming file archives, allowing resumable operations.
+  - *Mitigation*: Batch-oriented, chunked processing with persistent execution journaling and streaming file archives, allowing resumable operations across multiple HTTP requests or CLI executions.
 
-### 8. Preflight Checks, Dry-Run Validation, and Rollback
+### 8. Reliability, Rollback, and Recovery Design Goals
 - **Design**:
-  - Every migration must pass an automated preflight dry-run check:
-    - Sufficient disk space for temporary staging and extracted files.
-    - Database user privileges (`CREATE`, `DROP`, `ALTER`, `INDEX`).
-    - Detection of existing table collisions on target.
-    - PHP memory and timeout constraints.
-  - Safe rollback: Any failure during extraction or database restoration must revert changes to ensure zero data loss.
+  - Achieving universal, atomic "all-or-nothing" rollback across disparate filesystems, database storage engines (e.g. MyISAM or non-transactional DDL operations like `CREATE TABLE` and `DROP TABLE` in MySQL), and remote network streams is physically impossible without disciplined staging and recovery mechanisms.
+  - Reliability is treated as a set of rigorous **design goals to test**:
+    - **Pre-flight Dry-Run**: Validates disk space, execution limits, database user privileges (`CREATE`, `DROP`, `ALTER`, `INDEX`), and table collisions before executing mutations.
+    - **Backup Restore Points**: Snapshot existing site tables and configuration before beginning target writes.
+    - **Staged Staging Directory**: Perform file extraction and decompression in an isolated temporary staging directory (`tmp/`) prior to atomic filesystem move/swap.
+    - **Import Journaling & Checkpoints**: Track migration progress step-by-step in a state journal, enabling idempotency and resumption.
+    - **Best-Effort Compensating Rollback**: In case of runtime failure, execute clean-up compensations where safe (e.g., removing newly created staged tables and directories).
+    - **Clear Manual Recovery States**: When partial failures cannot be safely reverted automatically (e.g., mid-DDL interruption), present detailed diagnostic reports and logs allowing manual recovery from restore points.
 
 ### 9. Authentication and Permission Enforcement
 - **Design**:
