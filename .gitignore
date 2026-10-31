@@ -1,0 +1,26 @@
+# Operating System Files
+.DS_Store
+Thumbs.db
+
+# Editor and IDE Files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Build and Dependency Artifacts
+vendor/
+node_modules/
+dist/
+build/
+*.log
+
+# Migration and Temporary Files
+*.tar.gz
+*.zip
+*.sql
+*.sql.gz
+tmp/
+backups/
+siteconvoy-exports/
