@@ -43,3 +43,18 @@ if ( ! function_exists( 'add_action' ) ) {
 		return true;
 	}
 }
+
+if ( ! function_exists( 'wp_json_encode' ) ) {
+	/**
+	 * Minimal stub for wp_json_encode() during standalone unit tests.
+	 *
+	 * @param mixed $data    Data to encode.
+	 * @param int   $options JSON options.
+	 * @param int   $depth   Depth.
+	 * @return string|false JSON string or false.
+	 */
+	function wp_json_encode( $data, $options = 0, $depth = 512 ) { // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode
+		return json_encode( $data, $options, $depth );
+	}
+}
