@@ -149,7 +149,11 @@ class SourceDiscoveryAndPreflightTest extends WP_UnitTestCase {
 			return;
 		}
 
-		// Create a secondary subsite (Site ID >= 2).
+		// Create a Secondary subsite (Site ID >= 2) with real physical tables (removing WP_UnitTestCase's temporary-table filter
+		// so MySQL 8.0 SHOW TABLES lists the subsite and custom tables identically to MariaDB).
+		remove_filter( 'query', array( $this, '_create_temporary_tables' ) );
+		remove_filter( 'query', array( $this, '_drop_temporary_tables' ) );
+
 		$subsite_id = self::factory()->blog->create(
 			array(
 				'domain' => 'example.org',
@@ -158,7 +162,6 @@ class SourceDiscoveryAndPreflightTest extends WP_UnitTestCase {
 			)
 		);
 
-		// Create a custom table matching the subsite prefix and a legacy blog_versions table to test classification.
 		$custom_subsite_table = $wpdb->get_blog_prefix( $subsite_id ) . 'custom_plugin_items';
 		$legacy_mu_table      = $wpdb->base_prefix . 'blog_versions';
 
@@ -204,6 +207,12 @@ class SourceDiscoveryAndPreflightTest extends WP_UnitTestCase {
 			$wpdb->query( "DROP TABLE IF EXISTS `{$custom_subsite_table}`" );
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 			$wpdb->query( "DROP TABLE IF EXISTS `{$legacy_mu_table}`" );
+			foreach ( $wpdb->tables( 'blog', true, $subsite_id ) as $subsite_core_table ) {
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$wpdb->query( "DROP TABLE IF EXISTS `{$subsite_core_table}`" );
+			}
+			add_filter( 'query', array( $this, '_create_temporary_tables' ) );
+			add_filter( 'query', array( $this, '_drop_temporary_tables' ) );
 		}
 	}
 
@@ -233,16 +242,30 @@ class SourceDiscoveryAndPreflightTest extends WP_UnitTestCase {
 		$this->assertTrue( $this->has_finding( $missing, 'SC_SOURCE_SITE_NOT_FOUND', PreflightFinding::SEVERITY_BLOCKER ) );
 
 		// 3. Archived subsite produces a warning finding.
+		remove_filter( 'query', array( $this, '_create_temporary_tables' ) );
+		remove_filter( 'query', array( $this, '_drop_temporary_tables' ) );
+
 		$archived_blog_id = self::factory()->blog->create(
 			array(
 				'domain' => 'example.org',
 				'path'   => '/archived-subsite/',
 			)
 		);
-		update_blog_status( $archived_blog_id, 'archived', 1 );
 
-		$archived_report = $service->run( MigrationMode::SUBSITE_TO_STANDALONE, $archived_blog_id );
-		$this->assertTrue( $this->has_finding( $archived_report, 'SC_SOURCE_SITE_NON_STANDARD_STATUS', PreflightFinding::SEVERITY_WARNING ) );
+		try {
+			update_blog_status( $archived_blog_id, 'archived', 1 );
+
+			$archived_report = $service->run( MigrationMode::SUBSITE_TO_STANDALONE, $archived_blog_id );
+			$this->assertTrue( $this->has_finding( $archived_report, 'SC_SOURCE_SITE_NON_STANDARD_STATUS', PreflightFinding::SEVERITY_WARNING ) );
+		} finally {
+			global $wpdb;
+			foreach ( $wpdb->tables( 'blog', true, $archived_blog_id ) as $archived_core_table ) {
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$wpdb->query( "DROP TABLE IF EXISTS `{$archived_core_table}`" );
+			}
+			add_filter( 'query', array( $this, '_create_temporary_tables' ) );
+			add_filter( 'query', array( $this, '_drop_temporary_tables' ) );
+		}
 	}
 
 	/**
