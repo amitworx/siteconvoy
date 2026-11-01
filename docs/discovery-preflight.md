@@ -36,7 +36,7 @@ The `SITECONVOY-M1-002` subsystem provides deterministic source inspection and p
 
 ## 3. Authorization & Security Boundaries
 
-1. **Pre-Discovery Capability Gate**:
+1. **Dual-Layer Capability Gate (`PreflightService` & `SourceDiscoveryService`)**:
    - `PreflightService::run()` checks capabilities **before** calling `SourceDiscoveryService::discover()`:
      - Multisite installation (`is_multisite() === true`): requires `current_user_can( 'manage_network' )`. A single-subsite administrator (`manage_options` without `manage_network`) is denied.
      - Standalone installation (`is_multisite() === false`): requires `current_user_can( 'manage_options' )`.
@@ -45,6 +45,9 @@ The `SITECONVOY-M1-002` subsystem provides deterministic source inspection and p
      - `can_proceed_to_next_stage = false`
      - `source_inventory = null`
      - Finding `SC_AUTH_FORBIDDEN` (`blocker`)
+   - **Direct `SourceDiscoveryService` Privilege Enforcement**: `SourceDiscoveryService` is an internal privileged service and is not exposed via any public endpoint or UI. As defense-in-depth, both `SourceDiscoveryService::discover()` and `SourceDiscoveryService::enumerate_network_sites()` enforce `assert_authorized()` (`manage_network` on multisite; `manage_options` on standalone) directly at the inventory boundary, throwing a `\RuntimeException` if invoked by an unauthorized caller without going through `PreflightService`.
+2. **Strict Source Site ID Validation**:
+   - `MigrationMode::validate_source_site_id()` validates any supplied `$source_site_id` **before** integer conversion. Only `null`, a positive `int`, or a canonical positive decimal digit string (`^[1-9][0-9]*$`) is accepted. Non-integer strings (including numeric prefixes like `'1abc'` or leading zeros like `'01'`), floats/fractions, booleans, arrays, objects, zero, and negative numbers are rejected (`SC_INVALID_SOURCE_SITE_ID` in `PreflightService::run()`; `\InvalidArgumentException` in `SourceDiscoveryService::discover()`) rather than being coerced into a blog ID.
 2. **Data Minimization & Zero Secret Exposure**:
    - Discovery and preflight reports never read or serialize database credentials (`DB_PASSWORD`), authentication keys/salts (`AUTH_KEY`, `SECURE_AUTH_KEY`, etc.), user password hashes (`user_pass`), user email addresses (`user_email`), session tokens, or raw option values.
    - Filesystem paths in `filesystem.uploads_relative_basedir` are normalized relative to `ABSPATH` to avoid leaking host filesystem user directories.
@@ -70,16 +73,20 @@ During `SITECONVOY-M1-002`, `SourceDiscoveryService` was verified directly again
 5. **`legacy_multisite`**:
    - Detects legacy pre-3.0 WordPress MU tables not registered in `wpdb::$ms_global_tables`, specifically `{$wpdb->base_prefix}blog_versions`, when physically present in `SHOW TABLES`.
 6. **`unknown_custom`**:
-   - Physical tables in `SHOW TABLES` that do not belong to any core catalog across any network subsite are classified into:
-     - `blog_prefix_matched`: Custom/plugin tables matching the inspected site's prefix (triggers `SC_UNKNOWN_CUSTOM_TABLES_DETECTED`).
-     - `base_prefix_matched`: Custom tables matching `$wpdb->base_prefix` (or another subsite's prefix when inspecting a secondary subsite).
+   - Physical tables in `SHOW TABLES` that do not belong to any core catalog across any current-network subsite are classified into:
+     - `blog_prefix_matched`: Custom/plugin tables matching the inspected site's prefix.
+     - `base_prefix_matched`: Custom tables matching `$wpdb->base_prefix` (for example, shared network/plugin lookup tables that a subsite may depend on, or tables matching another subsite's prefix).
      - `unprefixed_other`: Tables in the same database without `$wpdb->base_prefix`.
+   - **Ambiguous Ownership Rule**: A naming prefix alone does not prove custom table ownership. `PreflightService` emits `SC_UNKNOWN_CUSTOM_TABLES_DETECTED` (`warning`) whenever **any** of the three `unknown_custom` categories is non-empty, recording `ownership_status = 'unresolved'` along with the breakdown across all three categories for explicit operator review.
 
 ---
 
-## 5. Paginated Network Site Enumeration
+## 5. Network-Scoped Paginated Site Enumeration & Foreign-Network Rejection
 
-WordPress's `get_sites()` defaults to `'number' => 100`. To ensure networks with more than 100 subsites are never silently truncated during discovery, `SourceDiscoveryService::enumerate_network_sites( int $batch_size = 100 )` queries `get_sites()` in deterministic pages (`'orderby' => 'id'`, `'order' => 'ASC'`, `'number' => $batch_size`, `'offset' => $offset`) until a page returns fewer than `$batch_size` results.
+WordPress's `get_sites()` defaults to `'number' => 100` and, if `network_id` is omitted, can return sites across multiple networks. `SourceDiscoveryService::enumerate_network_sites( int $batch_size = 100, ?int $network_id = null )` scopes every paginated `get_sites()` query to the current network (`'network_id' => $target_network_id`, `'orderby' => 'id'`, `'order' => 'ASC'`, `'number' => $batch_size`, `'offset' => $offset`) until a page returns fewer than `$batch_size` results.
+
+Furthermore, when an explicit `$source_site_id` is inspected via `get_site( $site_id )`, `SourceDiscoveryService` verifies that `(int) $site->site_id === $current_network_id`:
+- If a site belongs to a different network (`belongs_to_current_network = false`), `is_valid_source` is set to `false`, `SourceDiscoveryService` does not switch to that foreign blog to inspect its options/filesystem, and `PreflightService` blocks the operation with `SC_SOURCE_SITE_FOREIGN_NETWORK` (`blocker`).
 
 ---
 
@@ -98,14 +105,16 @@ WordPress's `get_sites()` defaults to `'number' => 100`. To ensure networks with
 |---|---|---|
 | `SC_AUTH_FORBIDDEN` | `blocker` | Current user lacks `manage_network` (multisite) or `manage_options` (standalone). |
 | `SC_INVALID_MIGRATION_MODE` | `blocker` | Requested mode is not one of the four `MigrationMode` constants. |
+| `SC_INVALID_SOURCE_SITE_ID` | `blocker` | Supplied `$source_site_id` is malformed (non-integer string, fraction/float, boolean, array, or `<= 0`). |
 | `SC_MODE_SOURCE_MISMATCH` | `blocker` | Multisite mode requested on standalone install, or standalone mode requested on multisite. |
 | `SC_SOURCE_SITE_ID_REQUIRED` | `blocker` | `subsite_to_standalone` or `subsite_to_multisite` called without a positive `$source_site_id`. |
 | `SC_SOURCE_SITE_NOT_FOUND` | `blocker` | Requested `$source_site_id` does not exist in `get_site()`. |
+| `SC_SOURCE_SITE_FOREIGN_NETWORK` | `blocker` | Requested `$source_site_id` exists in `wp_blogs` but belongs to a different `network_id` (`site_id`). |
 | `SC_CUSTOM_USER_TABLE_UNSUPPORTED` | `blocker` | `CUSTOM_USER_TABLE` or `CUSTOM_USER_META_TABLE` is defined. |
 | `SC_MULTI_NETWORK_UNSUPPORTED` | `blocker` | Multisite installation contains more than one network (`get_networks( ['count' => true] ) > 1`). |
 | `SC_MISSING_CORE_BLOG_TABLES` | `blocker` | One or more core `blog` tables for the target source site do not physically exist. |
 | `SC_SOURCE_SITE_NON_STANDARD_STATUS` | `warning` | Target source subsite is marked `archived`, `spam`, `deleted`, or `mature`. |
-| `SC_UNKNOWN_CUSTOM_TABLES_DETECTED` | `warning` | Non-core tables matching the target site prefix exist in the database. |
+| `SC_UNKNOWN_CUSTOM_TABLES_DETECTED` | `warning` | Non-core tables exist in `blog_prefix_matched`, `base_prefix_matched`, or `unprefixed_other` (ownership unresolved). |
 | `SC_LEGACY_MULTISITE_TABLES_DETECTED` | `warning` | Legacy MU table `{$base_prefix}blog_versions` exists physically in the database. |
 | `SC_LEGACY_BLOGS_DIR_UPLOADS` | `warning` | Legacy `blogs.dir` upload path or `ms_files_rewriting` option is active. |
 | `SC_OFFLOADED_MEDIA_INDICATORS` | `warning` | Active plugin slugs indicate potential external cloud media offloading. |

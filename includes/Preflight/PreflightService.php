@@ -49,13 +49,14 @@ class PreflightService {
 	 * Execute a read-only source preflight check for the requested migration mode.
 	 *
 	 * @param string               $mode                Migration mode identifier (see MigrationMode).
-	 * @param int|null             $source_site_id      Optional source site (blog) ID for subsite modes.
+	 * @param mixed                $source_site_id      Optional source site (blog) ID for subsite modes.
 	 * @param array<string, mixed> $target_expectations Optional caller-provided target expectations.
 	 * @return PreflightReport Structured read-only preflight report.
 	 */
 	public function run( $mode, $source_site_id = null, array $target_expectations = array() ) {
 		$normalized_mode    = is_string( $mode ) ? trim( $mode ) : '';
-		$normalized_site_id = null !== $source_site_id ? (int) $source_site_id : null;
+		$site_id_validation = MigrationMode::validate_source_site_id( $source_site_id );
+		$normalized_site_id = $site_id_validation['valid'] ? $site_id_validation['site_id'] : null;
 		$is_multisite       = function_exists( 'is_multisite' ) && is_multisite();
 
 		$resolved_target = array(
@@ -119,7 +120,30 @@ class PreflightService {
 			);
 		}
 
-		// 3. Validate mode compatibility with current source topology (multisite vs standalone).
+		// 3. Validate supplied source_site_id strictly before any integer conversion or discovery.
+		if ( ! $site_id_validation['valid'] ) {
+			$findings[] = new PreflightFinding(
+				'SC_INVALID_SOURCE_SITE_ID',
+				PreflightFinding::SEVERITY_BLOCKER,
+				$site_id_validation['reason'],
+				array(
+					'mode'          => $normalized_mode,
+					'supplied_type' => gettype( $source_site_id ),
+				)
+			);
+
+			return new PreflightReport(
+				$normalized_mode,
+				null,
+				PreflightReport::STATUS_BLOCKED,
+				false,
+				$resolved_target,
+				null,
+				$findings
+			);
+		}
+
+		// 4. Validate mode compatibility with current source topology (multisite vs standalone).
 		$requires_ms_source = MigrationMode::requires_multisite_source( $normalized_mode );
 		if ( $requires_ms_source && ! $is_multisite ) {
 			$findings[] = new PreflightFinding(
@@ -149,9 +173,9 @@ class PreflightService {
 			);
 		}
 
-		// 4. Validate required source site ID for subsite-scoped modes.
+		// 5. Validate required source site ID for subsite-scoped modes.
 		if ( MigrationMode::requires_source_site_id( $normalized_mode ) ) {
-			if ( null === $normalized_site_id || $normalized_site_id <= 0 ) {
+			if ( null === $normalized_site_id ) {
 				$findings[] = new PreflightFinding(
 					'SC_SOURCE_SITE_ID_REQUIRED',
 					PreflightFinding::SEVERITY_BLOCKER,
@@ -167,27 +191,47 @@ class PreflightService {
 			}
 		}
 
-		// 5. Collect read-only source inventory.
+		// 6. Collect read-only source inventory.
 		$inventory = $this->discovery_service->discover( $normalized_site_id );
 
-		// 6. Evaluate source site existence and status flags when a specific subsite is required.
-		if ( $is_multisite && MigrationMode::requires_source_site_id( $normalized_mode ) && null !== $normalized_site_id && $normalized_site_id > 0 ) {
-			$target_site = isset( $inventory['target_source_site'] ) ? $inventory['target_source_site'] : array();
-			$exists      = ! empty( $target_site['exists'] );
+		// 7. Evaluate source site existence, current-network membership, and status flags when an explicit site ID is supplied on multisite.
+		if ( $is_multisite && null !== $normalized_site_id ) {
+			$target_site        = isset( $inventory['target_source_site'] ) ? $inventory['target_source_site'] : array();
+			$exists             = ! empty( $target_site['exists'] );
+			$belongs_to_current = ! empty( $target_site['belongs_to_current_network'] );
+			$current_net_id     = isset( $inventory['environment']['current_network_id'] )
+				? (int) $inventory['environment']['current_network_id']
+				: 1;
 
 			if ( ! $exists ) {
 				$findings[] = new PreflightFinding(
 					'SC_SOURCE_SITE_NOT_FOUND',
 					PreflightFinding::SEVERITY_BLOCKER,
 					sprintf(
-						'Requested source site ID %d does not exist in the current multisite network.',
+						'Requested source site ID %d does not exist in the current multisite installation.',
 						$normalized_site_id
 					),
 					array(
 						'source_site_id' => $normalized_site_id,
 					)
 				);
-			} else {
+			} elseif ( ! $belongs_to_current ) {
+				$findings[] = new PreflightFinding(
+					'SC_SOURCE_SITE_FOREIGN_NETWORK',
+					PreflightFinding::SEVERITY_BLOCKER,
+					sprintf(
+						'Requested source site ID %d belongs to network ID %d rather than the current network ID %d and is not a valid source site.',
+						$normalized_site_id,
+						isset( $target_site['network_id'] ) ? (int) $target_site['network_id'] : 0,
+						$current_net_id
+					),
+					array(
+						'source_site_id'     => $normalized_site_id,
+						'site_network_id'    => isset( $target_site['network_id'] ) ? (int) $target_site['network_id'] : 0,
+						'current_network_id' => $current_net_id,
+					)
+				);
+			} elseif ( MigrationMode::requires_source_site_id( $normalized_mode ) ) {
 				// Check non-standard site lifecycle flags (archived, spam, deleted).
 				$status_flags = isset( $target_site['status'] ) && is_array( $target_site['status'] ) ? $target_site['status'] : array();
 				$non_standard = array();
@@ -275,17 +319,37 @@ class PreflightService {
 			}
 		}
 
-		// 10. Evaluate unknown/custom tables and legacy multisite tables.
-		$unknown_blog_tables = isset( $inventory['tables']['unknown_custom']['blog_prefix_matched'] )
-			? $inventory['tables']['unknown_custom']['blog_prefix_matched']
+		// 10. Evaluate unknown and ambiguous custom tables across all categories, plus legacy multisite tables.
+		$unknown_custom_group = isset( $inventory['tables']['unknown_custom'] ) && is_array( $inventory['tables']['unknown_custom'] )
+			? $inventory['tables']['unknown_custom']
 			: array();
-		if ( ! empty( $unknown_blog_tables ) ) {
+		$unknown_blog_tables  = isset( $unknown_custom_group['blog_prefix_matched'] ) && is_array( $unknown_custom_group['blog_prefix_matched'] )
+			? $unknown_custom_group['blog_prefix_matched']
+			: array();
+		$unknown_base_tables  = isset( $unknown_custom_group['base_prefix_matched'] ) && is_array( $unknown_custom_group['base_prefix_matched'] )
+			? $unknown_custom_group['base_prefix_matched']
+			: array();
+		$unprefixed_tables    = isset( $unknown_custom_group['unprefixed_other'] ) && is_array( $unknown_custom_group['unprefixed_other'] )
+			? $unknown_custom_group['unprefixed_other']
+			: array();
+
+		$all_unknown_tables = array_values(
+			array_unique(
+				array_merge( $unknown_blog_tables, $unknown_base_tables, $unprefixed_tables )
+			)
+		);
+
+		if ( ! empty( $all_unknown_tables ) ) {
 			$findings[] = new PreflightFinding(
 				'SC_UNKNOWN_CUSTOM_TABLES_DETECTED',
 				PreflightFinding::SEVERITY_WARNING,
-				'Custom or plugin-created database tables matching the source site prefix were detected and require explicit policy handling.',
+				'Unknown or ambiguous non-core database tables were detected across site-prefixed, network base-prefixed, or unprefixed namespaces. Prefix matching does not prove table ownership; explicit operator policy review is required.',
 				array(
-					'tables' => $unknown_blog_tables,
+					'ownership_status'    => 'unresolved',
+					'tables'              => $all_unknown_tables,
+					'blog_prefix_matched' => $unknown_blog_tables,
+					'base_prefix_matched' => $unknown_base_tables,
+					'unprefixed_other'    => $unprefixed_tables,
 				)
 			);
 		}

@@ -129,4 +129,58 @@ class MigrationMode {
 				return 'unknown';
 		}
 	}
+
+	/**
+	 * Strictly validate a supplied source site (blog) ID before integer conversion.
+	 *
+	 * Accepts only `null`, a positive `int`, or a canonical positive decimal digit string
+	 * (`^[1-9][0-9]*$`). Rejects non-integer strings (including numeric prefixes like `'1abc'`,
+	 * leading zeros like `'01'`, or whitespace), floats/fractions, booleans, arrays, objects,
+	 * zero, and negative numbers without coercing them into a blog ID.
+	 *
+	 * @param mixed $raw_site_id Raw candidate source site ID.
+	 * @return array{valid: bool, site_id: int|null, reason: string} Validation result.
+	 */
+	public static function validate_source_site_id( $raw_site_id ) {
+		if ( null === $raw_site_id ) {
+			return array(
+				'valid'   => true,
+				'site_id' => null,
+				'reason'  => '',
+			);
+		}
+
+		if ( is_int( $raw_site_id ) ) {
+			if ( $raw_site_id > 0 ) {
+				return array(
+					'valid'   => true,
+					'site_id' => $raw_site_id,
+					'reason'  => '',
+				);
+			}
+
+			return array(
+				'valid'   => false,
+				'site_id' => null,
+				'reason'  => 'Source site ID must be a positive integer greater than zero.',
+			);
+		}
+
+		if ( is_string( $raw_site_id ) && 1 === preg_match( '/^[1-9][0-9]*$/', $raw_site_id ) ) {
+			$int_val = (int) $raw_site_id;
+			if ( (string) $int_val === $raw_site_id && $int_val > 0 ) {
+				return array(
+					'valid'   => true,
+					'site_id' => $int_val,
+					'reason'  => '',
+				);
+			}
+		}
+
+		return array(
+			'valid'   => false,
+			'site_id' => null,
+			'reason'  => 'Source site ID must be a positive integer; non-integer strings, fractions, and booleans are not allowed.',
+		);
+	}
 }

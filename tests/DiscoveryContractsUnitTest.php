@@ -68,6 +68,52 @@ class DiscoveryContractsUnitTest extends TestCase {
 	}
 
 	/**
+	 * Test strict source site ID validation rejects malformed strings, fractions, booleans, arrays, and non-positive integers.
+	 */
+	public function test_strict_source_site_id_validation() {
+		$null_valid = MigrationMode::validate_source_site_id( null );
+		$this->assertTrue( $null_valid['valid'] );
+		$this->assertNull( $null_valid['site_id'] );
+
+		$int_valid = MigrationMode::validate_source_site_id( 1 );
+		$this->assertTrue( $int_valid['valid'] );
+		$this->assertSame( 1, $int_valid['site_id'] );
+
+		$digit_str_valid = MigrationMode::validate_source_site_id( '42' );
+		$this->assertTrue( $digit_str_valid['valid'] );
+		$this->assertSame( 42, $digit_str_valid['site_id'] );
+
+		$malformed_inputs = array(
+			'1abc',
+			'2.5',
+			'1e2',
+			' 1 ',
+			'+1',
+			'-1',
+			'0',
+			'01',
+			'',
+			0,
+			-5,
+			1.5,
+			1.0,
+			true,
+			false,
+			array( 1 ),
+			new \stdClass(),
+		);
+
+		foreach ( $malformed_inputs as $bad_input ) {
+			$result = MigrationMode::validate_source_site_id( $bad_input );
+			$this->assertFalse(
+				$result['valid'],
+				'Expected malformed source_site_id input to be rejected: ' . var_export( $bad_input, true ) // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_var_export
+			);
+			$this->assertNull( $result['site_id'] );
+		}
+	}
+
+	/**
 	 * Test PreflightFinding severity validation and JSON serialization.
 	 */
 	public function test_preflight_finding_structure_and_serialization() {

@@ -82,6 +82,228 @@ class SourceDiscoveryAndPreflightTest extends WP_UnitTestCase {
 	}
 
 	/**
+	 * Verify SourceDiscoveryService enforces privileged authorization directly at the discovery boundary.
+	 */
+	public function test_source_discovery_service_enforces_direct_authorization_boundary() {
+		$discovery = new SourceDiscoveryService();
+
+		// 1. Anonymous user calling discover() directly must throw RuntimeException.
+		wp_set_current_user( 0 );
+		try {
+			$discovery->discover( 1 );
+			$this->fail( 'Expected SourceDiscoveryService::discover() to reject unauthenticated direct invocation.' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'capability', $e->getMessage() );
+		}
+
+		// 2. Anonymous user calling enumerate_network_sites() directly must throw RuntimeException.
+		try {
+			$discovery->enumerate_network_sites();
+			$this->fail( 'Expected SourceDiscoveryService::enumerate_network_sites() to reject unauthenticated direct invocation.' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'capability', $e->getMessage() );
+		}
+
+		// 3. On multisite, a single-site administrator without manage_network calling discover() directly must throw RuntimeException.
+		if ( is_multisite() ) {
+			$site_admin_id = self::factory()->user->create( array( 'role' => 'administrator' ) );
+			wp_set_current_user( $site_admin_id );
+			$this->assertFalse( current_user_can( 'manage_network' ) );
+
+			try {
+				$discovery->discover( 1 );
+				$this->fail( 'Expected SourceDiscoveryService::discover() to reject non-network admin on multisite.' );
+			} catch ( \RuntimeException $e ) {
+				$this->assertStringContainsString( 'manage_network', $e->getMessage() );
+			}
+		}
+	}
+
+	/**
+	 * Verify malformed source site IDs (numeric prefixes, fractions, booleans, negative numbers) are rejected before integer conversion.
+	 */
+	public function test_malformed_source_site_ids_rejected_without_coercion() {
+		$admin_id = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		if ( is_multisite() ) {
+			grant_super_admin( $admin_id );
+		}
+		wp_set_current_user( $admin_id );
+
+		$service   = new PreflightService();
+		$discovery = new SourceDiscoveryService();
+		$mode      = is_multisite() ? MigrationMode::SUBSITE_TO_STANDALONE : MigrationMode::STANDALONE_TO_SUBSITE;
+
+		$malformed_ids = array(
+			'1abc',
+			'1.5',
+			1.5,
+			true,
+			false,
+			'01',
+			'-1',
+			0,
+			array( 1 ),
+		);
+
+		foreach ( $malformed_ids as $malformed_id ) {
+			$report = $service->run( $mode, $malformed_id );
+			$this->assertSame(
+				PreflightReport::STATUS_BLOCKED,
+				$report->get_status(),
+				'Malformed source_site_id must result in blocked status.'
+			);
+			$this->assertFalse( $report->can_proceed_to_next_stage() );
+			$this->assertNull(
+				$report->get_source_inventory(),
+				'Malformed source_site_id must not coerce to a blog ID or collect inventory.'
+			);
+			$this->assertTrue(
+				$this->has_finding( $report, 'SC_INVALID_SOURCE_SITE_ID', PreflightFinding::SEVERITY_BLOCKER ),
+				'Malformed source_site_id must produce SC_INVALID_SOURCE_SITE_ID blocker.'
+			);
+		}
+
+		// Also verify direct SourceDiscoveryService::discover() rejects malformed IDs such as '1abc' or true.
+		$this->expectException( \InvalidArgumentException::class );
+		$discovery->discover( '1abc' );
+	}
+
+	/**
+	 * Verify network site enumeration scopes to current network_id and out-of-network sites are rejected as invalid source sites.
+	 */
+	public function test_network_scoping_and_foreign_network_site_rejection() {
+		if ( ! is_multisite() ) {
+			$this->assertFalse( is_multisite() );
+			return;
+		}
+
+		$admin_id = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		grant_super_admin( $admin_id );
+		wp_set_current_user( $admin_id );
+
+		// Create a site on a secondary network (network_id / site_id = 2) in wp_blogs.
+		$foreign_blog_id = self::factory()->blog->create(
+			array(
+				'domain'  => 'foreign-network.example.org',
+				'path'    => '/foreign-subsite/',
+				'site_id' => 2,
+			)
+		);
+
+		$discovery = new SourceDiscoveryService();
+		$sites     = $discovery->enumerate_network_sites();
+
+		$enumerated_blog_ids = array_column( $sites, 'blog_id' );
+		$this->assertNotContains(
+			$foreign_blog_id,
+			$enumerated_blog_ids,
+			'enumerate_network_sites() must only return sites belonging to the current network_id.'
+		);
+
+		// Attempting to run preflight or discovery on a foreign-network blog ID must block and never describe it as a valid source.
+		$service        = new PreflightService( $discovery );
+		$foreign_report = $service->run( MigrationMode::SUBSITE_TO_STANDALONE, $foreign_blog_id );
+
+		$this->assertSame( PreflightReport::STATUS_BLOCKED, $foreign_report->get_status() );
+		$this->assertFalse( $foreign_report->can_proceed_to_next_stage() );
+		$this->assertTrue(
+			$this->has_finding( $foreign_report, 'SC_SOURCE_SITE_FOREIGN_NETWORK', PreflightFinding::SEVERITY_BLOCKER ),
+			'Foreign network subsite must trigger SC_SOURCE_SITE_FOREIGN_NETWORK blocker.'
+		);
+
+		$foreign_inv = $foreign_report->to_array()['source_inventory'];
+		$this->assertFalse(
+			$foreign_inv['target_source_site']['belongs_to_current_network'],
+			'Foreign network site must set belongs_to_current_network = false.'
+		);
+		$this->assertFalse(
+			$foreign_inv['target_source_site']['is_valid_source'],
+			'Foreign network site must never be marked as a valid source.'
+		);
+	}
+
+	/**
+	 * Verify unknown and ambiguous custom tables across all categories (blog_prefix_matched, base_prefix_matched, unprefixed_other)
+	 * trigger warnings with unresolved ownership when inspecting a subsite.
+	 */
+	public function test_unknown_and_ambiguous_custom_tables_warn_across_all_categories() {
+		global $wpdb;
+
+		$admin_id = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		if ( is_multisite() ) {
+			grant_super_admin( $admin_id );
+		}
+		wp_set_current_user( $admin_id );
+
+		remove_filter( 'query', array( $this, '_create_temporary_tables' ) );
+		remove_filter( 'query', array( $this, '_drop_temporary_tables' ) );
+
+		$subsite_id = is_multisite()
+			? self::factory()->blog->create(
+				array(
+					'domain' => 'example.org',
+					'path'   => '/ambiguous-tables-subsite/',
+				)
+			)
+			: 1;
+
+		$shared_base_table = $wpdb->base_prefix . 'shared_plugin_lookup';
+		$unprefixed_table  = 'sc_external_audit_ledger';
+
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$wpdb->query( "CREATE TABLE IF NOT EXISTS `{$shared_base_table}` (id INT PRIMARY KEY)" );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$wpdb->query( "CREATE TABLE IF NOT EXISTS `{$unprefixed_table}` (id INT PRIMARY KEY)" );
+
+		try {
+			$service = new PreflightService();
+			$mode    = is_multisite() ? MigrationMode::SUBSITE_TO_STANDALONE : MigrationMode::STANDALONE_TO_SUBSITE;
+			$site_id = is_multisite() ? $subsite_id : null;
+
+			$report = $service->run( $mode, $site_id );
+			$this->assertTrue(
+				$this->has_finding( $report, 'SC_UNKNOWN_CUSTOM_TABLES_DETECTED', PreflightFinding::SEVERITY_WARNING ),
+				'Must warn when base_prefix_matched or unprefixed_other custom tables exist, even if blog_prefix_matched is empty.'
+			);
+
+			$finding_context = null;
+			foreach ( $report->get_findings() as $finding ) {
+				if ( 'SC_UNKNOWN_CUSTOM_TABLES_DETECTED' === $finding->get_id() ) {
+					$finding_context = $finding->get_context();
+					break;
+				}
+			}
+
+			$this->assertIsArray( $finding_context );
+			$this->assertSame( 'unresolved', $finding_context['ownership_status'] );
+			$this->assertContains( $unprefixed_table, $finding_context['unprefixed_other'] );
+
+			if ( is_multisite() ) {
+				$this->assertContains(
+					$shared_base_table,
+					$finding_context['base_prefix_matched'],
+					'When inspecting Subsite 2, a custom table with base_prefix must be reported in base_prefix_matched.'
+				);
+			} else {
+				$this->assertContains( $shared_base_table, $finding_context['blog_prefix_matched'] );
+			}
+		} finally {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			$wpdb->query( "DROP TABLE IF EXISTS `{$shared_base_table}`" );
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			$wpdb->query( "DROP TABLE IF EXISTS `{$unprefixed_table}`" );
+			if ( is_multisite() && $subsite_id > 1 ) {
+				foreach ( $wpdb->tables( 'blog', true, $subsite_id ) as $subsite_core_table ) {
+					// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+					$wpdb->query( "DROP TABLE IF EXISTS `{$subsite_core_table}`" );
+				}
+			}
+			add_filter( 'query', array( $this, '_create_temporary_tables' ) );
+			add_filter( 'query', array( $this, '_drop_temporary_tables' ) );
+		}
+	}
+
+	/**
 	 * Verify mode compatibility checks against current runtime topology (standalone vs multisite).
 	 */
 	public function test_preflight_mode_compatibility_and_target_unverified_status() {
@@ -269,9 +491,15 @@ class SourceDiscoveryAndPreflightTest extends WP_UnitTestCase {
 	}
 
 	/**
-	 * Verify >100 network sites pagination does not truncate at WordPress default 100 limit.
+	 * Verify >100 network sites pagination does not truncate at WordPress default 100 limit and passes current network_id.
 	 */
 	public function test_network_site_enumeration_paginates_beyond_100_sites() {
+		$admin_id = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		if ( is_multisite() ) {
+			grant_super_admin( $admin_id );
+		}
+		wp_set_current_user( $admin_id );
+
 		$simulated_sites = array();
 		for ( $i = 1; $i <= 135; $i++ ) {
 			$simulated_sites[] = array(
@@ -284,18 +512,39 @@ class SourceDiscoveryAndPreflightTest extends WP_UnitTestCase {
 				'deleted'    => 0,
 			);
 		}
+		// Add a simulated foreign-network site (network_id = 2) to verify filtering.
+		$simulated_sites[] = array(
+			'blog_id'    => 136,
+			'network_id' => 2,
+			'domain'     => 'foreign.example.org',
+			'path'       => '/',
+			'archived'   => 0,
+			'spam'       => 0,
+			'deleted'    => 0,
+		);
 
-		$pages_requested = 0;
-		$custom_fetcher  = function ( $offset, $number ) use ( $simulated_sites, &$pages_requested ) {
+		$pages_requested      = 0;
+		$received_network_ids = array();
+		$custom_fetcher       = function ( $offset, $number, $network_id = 1 ) use ( $simulated_sites, &$pages_requested, &$received_network_ids ) {
 			++$pages_requested;
-			return array_slice( $simulated_sites, $offset, $number );
+			$received_network_ids[] = $network_id;
+			$filtered               = array_values(
+				array_filter(
+					$simulated_sites,
+					function ( $site ) use ( $network_id ) {
+						return (int) $site['network_id'] === (int) $network_id;
+					}
+				)
+			);
+			return array_slice( $filtered, $offset, $number );
 		};
 
 		$discovery = new SourceDiscoveryService( null, $custom_fetcher );
 		$sites     = $discovery->enumerate_network_sites( 50 );
 
-		$this->assertCount( 135, $sites, 'Must enumerate all 135 sites across multiple pages without truncating at 100.' );
+		$this->assertCount( 135, $sites, 'Must enumerate all 135 current-network sites across multiple pages without truncating at 100 or including foreign network sites.' );
 		$this->assertSame( 3, $pages_requested, '135 sites with batch size 50 must require 3 page queries.' );
+		$this->assertSame( array( 1, 1, 1 ), $received_network_ids, 'Each paginated query must scope to current network_id (1).' );
 		$this->assertSame( 1, $sites[0]['blog_id'] );
 		$this->assertSame( 135, $sites[134]['blog_id'] );
 	}

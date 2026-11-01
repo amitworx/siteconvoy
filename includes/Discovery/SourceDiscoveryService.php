@@ -2,15 +2,21 @@
 /**
  * Read-Only Source Discovery Service.
  *
- * Inspects the current WordPress installation (standalone or multisite)
- * using WordPress core APIs ($wpdb, get_sites, get_site, get_main_site_id,
- * wp_upload_dir) without performing any database mutations or exposing
- * secrets, credentials, salts, or personal user data.
+ * Internal privileged service that inspects the current WordPress installation
+ * (standalone or multisite) using WordPress core APIs ($wpdb, get_sites,
+ * get_site, get_main_site_id, wp_upload_dir) without performing any database
+ * mutations or exposing secrets, credentials, salts, or personal user data.
+ *
+ * Security boundary: Both PreflightService and SourceDiscoveryService enforce
+ * WordPress capability checks (`manage_network` on multisite; `manage_options`
+ * on standalone) before any inventory or site enumeration is performed.
  *
  * @package SiteConvoy
  */
 
 namespace SiteConvoy\Discovery;
+
+use SiteConvoy\Contracts\MigrationMode;
 
 // Direct access protection.
 if ( ! defined( 'ABSPATH' ) ) {
@@ -19,6 +25,9 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 /**
  * Class SourceDiscoveryService
+ *
+ * Privileged internal discovery service; enforces capability checks at its
+ * public entry points (`discover()` and `enumerate_network_sites()`).
  */
 class SourceDiscoveryService {
 
@@ -30,7 +39,7 @@ class SourceDiscoveryService {
 	private $overrides;
 
 	/**
-	 * Optional custom callable for paginated site fetching: function( int $offset, int $number ): array.
+	 * Optional custom callable for paginated site fetching: function( int $offset, int $number, int $network_id ): array.
 	 *
 	 * @var callable|null
 	 */
@@ -50,32 +59,43 @@ class SourceDiscoveryService {
 	/**
 	 * Collect a read-only source inventory for the current WordPress installation.
 	 *
-	 * Always preserves and restores the caller's active blog context if a blog
-	 * switch is performed to inspect a target source subsite.
+	 * Enforces privileged capability checks (`manage_network` on multisite,
+	 * `manage_options` on standalone) and strict `$target_site_id` validation
+	 * before inspecting the environment. Always preserves and restores the
+	 * caller's active blog context if a blog switch is performed.
 	 *
-	 * @param int|null $target_site_id Optional specific site (blog) ID to inspect on multisite.
+	 * @param int|string|null $target_site_id Optional specific site (blog) ID to inspect on multisite.
 	 * @return array<string, mixed> Structured read-only source inventory.
+	 * @throws \InvalidArgumentException When $target_site_id is malformed (non-integer string, float, bool, <= 0).
 	 */
 	public function discover( $target_site_id = null ) {
 		global $wpdb;
 
+		$this->assert_authorized();
+
+		$site_id_validation = MigrationMode::validate_source_site_id( $target_site_id );
+		if ( ! $site_id_validation['valid'] ) {
+			throw new \InvalidArgumentException( 'Invalid source site ID supplied to SourceDiscoveryService::discover().' );
+		}
+		$validated_site_id = $site_id_validation['site_id'];
+
 		$is_multisite    = function_exists( 'is_multisite' ) && is_multisite();
 		$initial_blog_id = function_exists( 'get_current_blog_id' ) ? (int) get_current_blog_id() : 1;
 		$main_site_id    = ( $is_multisite && function_exists( 'get_main_site_id' ) ) ? (int) get_main_site_id() : 1;
-		$current_net_id  = ( $is_multisite && function_exists( 'get_current_network_id' ) ) ? (int) get_current_network_id() : 1;
+		$current_net_id  = $this->resolve_current_network_id( $is_multisite );
 		$is_subdomain    = ( $is_multisite && function_exists( 'is_subdomain_install' ) ) ? (bool) is_subdomain_install() : false;
-		$inspect_site_id = null !== $target_site_id ? (int) $target_site_id : ( $is_multisite ? $main_site_id : 1 );
+		$inspect_site_id = null !== $validated_site_id ? $validated_site_id : ( $is_multisite ? $main_site_id : 1 );
 
 		$custom_user_table      = $this->resolve_custom_user_table();
 		$custom_user_meta_table = $this->resolve_custom_user_meta_table();
 		$network_count          = $this->resolve_network_count( $is_multisite );
 
-		$network_sites    = $is_multisite ? $this->enumerate_network_sites() : array();
-		$target_site_info = $this->inspect_target_site( $inspect_site_id, $is_multisite, $main_site_id, $wpdb );
+		$network_sites    = $is_multisite ? $this->enumerate_network_sites( 100, $current_net_id ) : array();
+		$target_site_info = $this->inspect_target_site( $inspect_site_id, $is_multisite, $main_site_id, $current_net_id, $wpdb );
 		$tables_inventory = $this->inspect_tables( $inspect_site_id, $is_multisite, $network_sites, $wpdb );
 		$files_and_deps   = $this->inspect_filesystem_and_dependencies(
 			$inspect_site_id,
-			$target_site_info['exists'],
+			$target_site_info['is_valid_source'],
 			$is_multisite,
 			$initial_blog_id
 		);
@@ -96,6 +116,7 @@ class SourceDiscoveryService {
 			),
 			'target_source_site' => $target_site_info,
 			'network_sites'      => array(
+				'network_id'  => $current_net_id,
 				'total_count' => count( $network_sites ),
 				'sites'       => $network_sites,
 			),
@@ -106,28 +127,35 @@ class SourceDiscoveryService {
 	}
 
 	/**
-	 * Enumerate all sites in a multisite network using explicit pagination so
-	 * networks with >100 sites are never silently truncated by WordPress's default limit.
+	 * Enumerate all sites in the specified (or current) multisite network using
+	 * explicit `network_id` scoping and pagination so networks with >100 sites
+	 * are never silently truncated and foreign-network sites are excluded.
 	 *
-	 * @param int $batch_size Page size per query (default 100).
-	 * @return array<int, array<string, mixed>> List of normalized site summaries.
+	 * @param int      $batch_size Page size per query (default 100).
+	 * @param int|null $network_id Optional explicit network ID (defaults to current network ID).
+	 * @return array<int, array<string, mixed>> List of normalized site summaries belonging to the network.
 	 */
-	public function enumerate_network_sites( $batch_size = 100 ) {
-		$batch_size = max( 1, (int) $batch_size );
-		$offset     = 0;
-		$all_sites  = array();
-		$main_id    = function_exists( 'get_main_site_id' ) ? (int) get_main_site_id() : 1;
+	public function enumerate_network_sites( $batch_size = 100, $network_id = null ) {
+		$this->assert_authorized();
+
+		$is_multisite      = function_exists( 'is_multisite' ) && is_multisite();
+		$target_network_id = null !== $network_id ? (int) $network_id : $this->resolve_current_network_id( $is_multisite );
+		$batch_size        = max( 1, (int) $batch_size );
+		$offset            = 0;
+		$all_sites         = array();
+		$main_id           = function_exists( 'get_main_site_id' ) ? (int) get_main_site_id( $target_network_id ) : 1;
 
 		while ( true ) {
 			if ( null !== $this->site_fetcher ) {
-				$batch = call_user_func( $this->site_fetcher, $offset, $batch_size );
+				$batch = call_user_func( $this->site_fetcher, $offset, $batch_size, $target_network_id );
 			} elseif ( function_exists( 'get_sites' ) ) {
 				$batch = get_sites(
 					array(
-						'number'  => $batch_size,
-						'offset'  => $offset,
-						'orderby' => 'id',
-						'order'   => 'ASC',
+						'network_id' => $target_network_id,
+						'number'     => $batch_size,
+						'offset'     => $offset,
+						'orderby'    => 'id',
+						'order'      => 'ASC',
 					)
 				);
 			} else {
@@ -139,7 +167,11 @@ class SourceDiscoveryService {
 			}
 
 			foreach ( $batch as $site ) {
-				$normalized  = $this->normalize_site_record( $site, $main_id );
+				$normalized = $this->normalize_site_record( $site, $main_id, $target_network_id );
+				// Enforce strict network_id match even if a custom fetcher returned mixed network records.
+				if ( (int) $normalized['network_id'] !== $target_network_id ) {
+					continue;
+				}
 				$all_sites[] = $normalized;
 			}
 
@@ -154,18 +186,54 @@ class SourceDiscoveryService {
 	}
 
 	/**
+	 * Enforce privileged authorization at the discovery service boundary.
+	 *
+	 * @return void
+	 * @throws \RuntimeException When current user lacks required capability.
+	 */
+	private function assert_authorized() {
+		$is_multisite = function_exists( 'is_multisite' ) && is_multisite();
+		$required_cap = $is_multisite ? 'manage_network' : 'manage_options';
+		$is_allowed   = function_exists( 'current_user_can' ) && current_user_can( $required_cap );
+
+		if ( ! $is_allowed ) {
+			$message = $is_multisite
+				? 'Unauthorized direct invocation of SourceDiscoveryService; required capability "manage_network" is missing.'
+				: 'Unauthorized direct invocation of SourceDiscoveryService; required capability "manage_options" is missing.';
+			throw new \RuntimeException( $message ); // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped
+		}
+	}
+
+	/**
+	 * Resolve the current network ID from overrides or WordPress core.
+	 *
+	 * @param bool $is_multisite Whether running in multisite.
+	 * @return int
+	 */
+	private function resolve_current_network_id( $is_multisite ) {
+		if ( isset( $this->overrides['current_network_id'] ) ) {
+			return (int) $this->overrides['current_network_id'];
+		}
+		if ( $is_multisite && function_exists( 'get_current_network_id' ) ) {
+			return (int) get_current_network_id();
+		}
+		return 1;
+	}
+
+	/**
 	 * Normalize a WP_Site object or associative array into a safe summary record.
 	 *
-	 * @param object|array<string, mixed> $site    WP_Site object or raw array.
-	 * @param int                         $main_id Main site ID for the network.
+	 * @param object|array<string, mixed> $site               WP_Site object or raw array.
+	 * @param int                         $main_id            Main site ID for the current network.
+	 * @param int                         $current_network_id Current network ID.
 	 * @return array<string, mixed>
 	 */
-	private function normalize_site_record( $site, $main_id ) {
+	private function normalize_site_record( $site, $main_id, $current_network_id = 1 ) {
 		global $wpdb;
 
 		if ( is_object( $site ) ) {
 			$blog_id    = isset( $site->blog_id ) ? (int) $site->blog_id : 0;
-			$network_id = isset( $site->site_id ) ? (int) $site->site_id : 1;
+			$network_id = isset( $site->site_id ) ? (int) $site->site_id : ( isset( $site->network_id ) ? (int) $site->network_id : 1 );
 			$domain     = isset( $site->domain ) ? (string) $site->domain : '';
 			$path       = isset( $site->path ) ? (string) $site->path : '/';
 			$public     = isset( $site->public ) ? (int) $site->public : 1;
@@ -175,7 +243,7 @@ class SourceDiscoveryService {
 			$deleted    = isset( $site->deleted ) ? (int) $site->deleted : 0;
 		} else {
 			$blog_id    = isset( $site['blog_id'] ) ? (int) $site['blog_id'] : 0;
-			$network_id = isset( $site['network_id'] ) ? (int) $site['network_id'] : 1;
+			$network_id = isset( $site['network_id'] ) ? (int) $site['network_id'] : ( isset( $site['site_id'] ) ? (int) $site['site_id'] : 1 );
 			$domain     = isset( $site['domain'] ) ? (string) $site['domain'] : '';
 			$path       = isset( $site['path'] ) ? (string) $site['path'] : '/';
 			$public     = isset( $site['public'] ) ? (int) $site['public'] : 1;
@@ -185,18 +253,21 @@ class SourceDiscoveryService {
 			$deleted    = isset( $site['deleted'] ) ? (int) $site['deleted'] : 0;
 		}
 
+		$belongs_to_current = ( $network_id === (int) $current_network_id );
+
 		$blog_prefix = ( isset( $wpdb ) && is_object( $wpdb ) && method_exists( $wpdb, 'get_blog_prefix' ) )
 			? (string) $wpdb->get_blog_prefix( $blog_id )
 			: 'wp_';
 
 		return array(
-			'blog_id'      => $blog_id,
-			'network_id'   => $network_id,
-			'domain'       => $domain,
-			'path'         => $path,
-			'is_main_site' => ( $blog_id === (int) $main_id ),
-			'blog_prefix'  => $blog_prefix,
-			'status'       => array(
+			'blog_id'                    => $blog_id,
+			'network_id'                 => $network_id,
+			'belongs_to_current_network' => $belongs_to_current,
+			'domain'                     => $domain,
+			'path'                       => $path,
+			'is_main_site'               => ( $belongs_to_current && $blog_id === (int) $main_id ),
+			'blog_prefix'                => $blog_prefix,
+			'status'                     => array(
 				'public'   => $public,
 				'archived' => $archived,
 				'mature'   => $mature,
@@ -207,15 +278,16 @@ class SourceDiscoveryService {
 	}
 
 	/**
-	 * Inspect the specific target source site metadata.
+	 * Inspect the specific target source site metadata and verify it belongs to the current network.
 	 *
-	 * @param int   $site_id      Site ID to inspect.
-	 * @param bool  $is_multisite Whether running in multisite.
-	 * @param int   $main_site_id Main site ID.
-	 * @param \wpdb $wpdb         WordPress database instance.
+	 * @param int   $site_id        Site ID to inspect.
+	 * @param bool  $is_multisite   Whether running in multisite.
+	 * @param int   $main_site_id   Main site ID.
+	 * @param int   $current_net_id Current network ID.
+	 * @param \wpdb $wpdb           WordPress database instance.
 	 * @return array<string, mixed>
 	 */
-	private function inspect_target_site( $site_id, $is_multisite, $main_site_id, $wpdb ) {
+	private function inspect_target_site( $site_id, $is_multisite, $main_site_id, $current_net_id, $wpdb ) {
 		if ( ! $is_multisite ) {
 			$home_url = function_exists( 'home_url' ) ? (string) home_url() : '';
 			$parsed   = function_exists( 'wp_parse_url' ) ? wp_parse_url( $home_url ) : array();
@@ -223,14 +295,16 @@ class SourceDiscoveryService {
 			$path     = is_array( $parsed ) && isset( $parsed['path'] ) && '' !== $parsed['path'] ? (string) $parsed['path'] : '/';
 
 			return array(
-				'blog_id'      => 1,
-				'exists'       => true,
-				'network_id'   => 1,
-				'domain'       => $domain,
-				'path'         => $path,
-				'is_main_site' => true,
-				'blog_prefix'  => (string) $wpdb->base_prefix,
-				'status'       => array(
+				'blog_id'                    => 1,
+				'exists'                     => true,
+				'belongs_to_current_network' => true,
+				'is_valid_source'            => true,
+				'network_id'                 => 1,
+				'domain'                     => $domain,
+				'path'                       => $path,
+				'is_main_site'               => true,
+				'blog_prefix'                => (string) $wpdb->base_prefix,
+				'status'                     => array(
 					'public'   => 1,
 					'archived' => 0,
 					'mature'   => 0,
@@ -242,33 +316,38 @@ class SourceDiscoveryService {
 
 		if ( $site_id <= 0 || ! function_exists( 'get_site' ) ) {
 			return array(
-				'blog_id'      => $site_id,
-				'exists'       => false,
-				'network_id'   => 0,
-				'domain'       => '',
-				'path'         => '',
-				'is_main_site' => false,
-				'blog_prefix'  => '',
-				'status'       => array(),
+				'blog_id'                    => $site_id,
+				'exists'                     => false,
+				'belongs_to_current_network' => false,
+				'is_valid_source'            => false,
+				'network_id'                 => 0,
+				'domain'                     => '',
+				'path'                       => '',
+				'is_main_site'               => false,
+				'blog_prefix'                => '',
+				'status'                     => array(),
 			);
 		}
 
 		$site_obj = get_site( $site_id );
 		if ( ! $site_obj ) {
 			return array(
-				'blog_id'      => $site_id,
-				'exists'       => false,
-				'network_id'   => 0,
-				'domain'       => '',
-				'path'         => '',
-				'is_main_site' => false,
-				'blog_prefix'  => (string) $wpdb->get_blog_prefix( $site_id ),
-				'status'       => array(),
+				'blog_id'                    => $site_id,
+				'exists'                     => false,
+				'belongs_to_current_network' => false,
+				'is_valid_source'            => false,
+				'network_id'                 => 0,
+				'domain'                     => '',
+				'path'                       => '',
+				'is_main_site'               => false,
+				'blog_prefix'                => (string) $wpdb->get_blog_prefix( $site_id ),
+				'status'                     => array(),
 			);
 		}
 
-		$normalized           = $this->normalize_site_record( $site_obj, $main_site_id );
-		$normalized['exists'] = true;
+		$normalized                    = $this->normalize_site_record( $site_obj, $main_site_id, $current_net_id );
+		$normalized['exists']          = true;
+		$normalized['is_valid_source'] = (bool) $normalized['belongs_to_current_network'];
 
 		return $normalized;
 	}
