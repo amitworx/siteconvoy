@@ -13,7 +13,7 @@
 |---|---|---|---|---|
 | **Direction 1: Multisite Subsite &rarr; Standalone** | **HIGH** (Standard Subsite) / **MODERATE** (Site ID 1) | Prefix normalization (`wp_{id}_` to `wp_`); user filtering; uploads path shift; Site ID 1 `ms_global` table isolation. | Chunked SQL extraction, table rename, user capability rewrite, media translocation. | Memory benchmarking on large serialized options; Site ID 1 table isolation test. |
 | **Direction 2: Multisite Subsite &rarr; Another Multisite** | **MODERATE** | User ID collisions; target blog ID allocation; prefix rewriting; media relocation to target site folder. | Preflight user collision detection; explicit admin mapping review; author ID re-indexing; staged import. | Collision remapping engine; role verification gate. |
-| **Direction 3: Full Multisite Network &rarr; New Environment** | **HIGH** | Batch domain/path replacements across all site tables and sitemeta; uploads tree relocation; `wp-config.php` constants; complete network table inventory. | Full database dump with selective serialized search-and-replace (excluding GUIDs); streaming media transfer. | Large multi-site archive streaming; non-transactional DDL recovery. |
+| **Direction 3: Full Multisite Network &rarr; New Environment** | **HIGH** | Batch domain/path replacements across all site tables and sitemeta; uploads tree relocation; `wp-config.php` constants; complete network table and asset inventory. | Full database dump with selective serialized search-and-replace (excluding GUIDs); streaming media and asset transfer. | Large multi-site archive streaming; non-transactional DDL recovery; drop-in compatibility validation. |
 | **Direction 4: Standalone WordPress &rarr; Multisite Subsite** | **MODERATE** | Table prefix rewrite (`wp_` to `wp_{new_id}_`); user integration into network `wp_users`; media relocation to `uploads/sites/{new_id}/`. | Preflight collision detection; new user injection with non-colliding logins/emails or admin approval; prefix transformation. | Standalone admin mapping without network elevation; prefix rewrite validator. |
 
 ---
@@ -70,18 +70,32 @@
 
 ## 4. Direction 3: Full Multisite Network &rarr; New Environment
 
-### 4.1 Scope & Complete Network Table Inventory
-Full network migration encompasses the complete network database topology:
-- **Shared User Tables (`global`)**: `{$base_prefix}users`, `{$base_prefix}usermeta`.
-- **Multisite Global Governance Tables (`ms_global`)**:
-  - `{$base_prefix}blogs` &mdash; Subsite registration records.
-  - `{$base_prefix}site` &mdash; Network domain/path definition.
-  - `{$base_prefix}sitemeta` &mdash; Network-wide options, active sitewide plugins, admin list.
-  - `{$base_prefix}signups` &mdash; Pending user registrations and site activation keys.
-  - `{$base_prefix}registration_log` &mdash; Historical subsite creation ledger.
-  - `{$base_prefix}blog_versions` &mdash; Schema upgrade tracking per blog.
-- **Site-Specific Tables (`blog`)**: All tables for Site 1 (`{$base_prefix}{table}`) and all secondary subsites (`{$base_prefix}{id}_{table}`).
-- **Custom / Third-Party Tables**: Plugin tables matching network or subsite naming conventions.
+### 4.1 Scope: Complete Database & Content Asset Inventory
+Full network migration is not merely a database dump; it requires comprehensive provisioning of the entire multisite runtime ecosystem:
+
+1. **Complete Database Topology**:
+   - **Shared User Tables (`global`)**: `{$base_prefix}users`, `{$base_prefix}usermeta`.
+   - **Multisite Global Governance Tables (`ms_global`)**:
+     - `{$base_prefix}blogs` &mdash; Subsite registration records.
+     - `{$base_prefix}site` &mdash; Network domain/path definition.
+     - `{$base_prefix}sitemeta` &mdash; Network-wide options, active sitewide plugins, admin list.
+     - `{$base_prefix}signups` &mdash; Pending user registrations and site activation keys.
+     - `{$base_prefix}registration_log` &mdash; Historical subsite creation ledger.
+     - `{$base_prefix}blog_versions` &mdash; Schema upgrade tracking per blog.
+   - **Site-Specific Tables (`blog`)**: All tables for Site 1 (`{$base_prefix}{table}`) and all secondary subsites (`{$base_prefix}{id}_{table}`).
+   - **Custom / Third-Party Tables**: Plugin tables matching network or subsite naming conventions.
+2. **Themes & Child Themes**:
+   - Discovery of all network-enabled themes in `sitemeta` and active subsite themes.
+   - Automatic parent-child relationship detection: parent themes are automatically included whenever a child theme is detected.
+3. **Plugins & Network Activation**:
+   - Inventory of `active_sitewide_plugins` (network activated) and per-site active plugins.
+   - Destination validation ensuring network activation state is preserved.
+4. **Must-Use Plugins (`mu-plugins`) & Drop-Ins**:
+   - Capture of `wp-content/mu-plugins/`.
+   - Discovery and validation of drop-ins (`object-cache.php`, `db.php`, `advanced-cache.php`, `sunrise.php`).
+   - *Blocking Condition*: Drop-ins requiring host-specific caching sockets or unavailable PHP extensions (e.g. Memcached extension absent on target) will trigger a preflight blocker rather than allowing destination runtime failure.
+5. **Languages & Custom Content Directories**:
+   - Discovery of translations in `wp-content/languages/` and custom directories defined by `WP_CONTENT_DIR` or constants.
 
 ### 4.2 Pipeline & Technical Transformations
 1. **Full Database Capture**: Export all global, `ms_global`, and site-specific tables.
@@ -92,6 +106,7 @@ Full network migration encompasses the complete network database topology:
    - Preserve `wp_posts.guid` on all posts across all sites.
 3. **Filesystem Migration**:
    - Transfer entire `wp-content/uploads/` hierarchy preserving `sites/` directory tree.
+   - Transfer verified themes, plugins, mu-plugins, and drop-ins.
 4. **Configuration Generation**:
    - Generate updated `wp-config.php` network constants (`DOMAIN_CURRENT_SITE`, `PATH_CURRENT_SITE`).
 
@@ -115,7 +130,7 @@ Full network migration encompasses the complete network database topology:
      - Set `{$target_base_prefix}{$new_blog_id}_capabilities` for imported accounts.
      - Assign site administrator role based on explicit target-admin review (never granting network super-admin rights).
 3. **Media Relocation**:
-   - Move standalone uploads from `wp-content/uploads/` into target network folder `wp-content/uploads/sites/{new_blog_id}/`.
+   - Move standalone uploads from `wp-content/uploads/` into target network folder `wp-content/uploads/sites/{new_id}/`.
 4. **Search and Replace**:
    - Update site URLs to network subsite domain/path format, leaving GUIDs unchanged.
 
@@ -131,6 +146,7 @@ To ensure maintainability and testability, SiteConvoy separates common pipeline 
 |  - Preflight & Discovery Validator     - Streaming Archiver (Tar/Zip)             |
 |  - Serialized Data Search/Replace       - State Journal & Pre-batch Checkpointing  |
 |  - Checksum Verification & Trust Review - Staged Staging Directory Sandbox         |
+|  - Asset & Dependency Inspector        - Media Filesystem Manager                 |
 +-----------------------------------------------------------------------------------+
                                           |
       +-------------------+---------------+-------------------+-------------------+
@@ -140,6 +156,7 @@ Subsite -> Standalone Subsite -> Multisite              Full Network        Stan
 - Prefix -> base    - Allocate blog_id                  - Global & ms_global- Prefix -> {id}_*
 - Strip ms_global   - Cross-user review & re-indexing   - All-site URL maps - Inject into wp_users
 - Uploads -> root   - Uploads -> sites/{target_id}/     - wp-config updates - Uploads -> sites/{id}/
+- Single theme/plug - Merge plugins & themes            - Full asset tree   - Single theme/plug
 ```
 
 ---
@@ -152,16 +169,21 @@ When migrating sites under live traffic, ongoing source mutations pose significa
 1. **Database / Media Skew**: A post referencing a newly uploaded image is exported, but the media file is created *after* the uploads archiver has finished scanning. Result: Broken media attachment on destination.
 2. **Comment / Post Inconsistency**: A new post is published during export, but its associated comments or taxonomy terms are captured in a later chunk, leading to orphaned foreign keys or inconsistent counts.
 3. **Session & Auth Drift**: User password updates during export can result in invalid password hashes or invalidated sessions on the destination.
+4. **REST API & Background Job Mutations**: Displaying a maintenance banner or notice only affects visual browser visitors. REST API endpoints, XML-RPC requests, Webhooks, and WP-Cron scheduled tasks continue executing database writes in the background unless explicitly gated.
 
-### 7.2 Consistency Mechanisms & Environmental Boundaries
-- **Maintenance / Read-Only Window**:
-  - *Mechanism*: Programmatically set the migrating site into maintenance mode (e.g. via drop-in or option flag) preventing new posts, comments, or media uploads.
-  - *Environmental Reality*: Fully effective on dedicated or controlled environments; user-facing caveats required.
-- **Database Snapshots**:
-  - Where supported (e.g. MySQL transactional read views `START TRANSACTION WITH CONSISTENT SNAPSHOT`), ensure database tables are dumped from a single coherent point in time. Note that DDL statements and non-InnoDB tables break consistent snapshots.
-- **Shared Hosting Limitations**:
-  - On constrained shared hosting without snapshot capabilities or CLI access, SiteConvoy **cannot universally guarantee** zero-mutation consistency if the site remains active.
-  - *Policy*: Clearly flag this condition during preflight, recommend an off-peak maintenance window, and record an explicit timestamped journal entry warning the operator of potential live-write drift.
+### 7.2 Requirements for a Reliable Migration Write Freeze
+To achieve a genuinely reliable migration freeze without data skew:
+- **Comprehensive Write Freeze Requirements**:
+  1. **HTTP/Browser**: Set maintenance drop-in (`.maintenance` or `wp-content/maintenance.php`) returning HTTP 503 Service Unavailable.
+  2. **REST API & Webhooks**: Intercept `rest_pre_dispatch` or early action hooks to block write requests (`POST`, `PUT`, `DELETE`, `PATCH`) with HTTP 503 during active export.
+  3. **Scheduled Tasks**: Temporarily disable WP-Cron spawning (`define('DISABLE_WP_CRON', true)` or hooking `pre_schedule_event`) to prevent automated background modifications.
+  4. **Database Snapshots**: Where supported by database infrastructure (e.g. `START TRANSACTION WITH CONSISTENT SNAPSHOT` in MySQL/MariaDB for InnoDB), dump all database tables from a single coherent point in time. Note that DDL statements and non-InnoDB tables break transactional consistency.
+- **Handling Inconsistent Exports & Shared Hosting Limits**:
+  - On constrained shared hosting without filesystem write access to drop-ins, without snapshot privileges, or where external database connections bypass WordPress entirely, a perfect write freeze **cannot be guaranteed**.
+  - *Policy & Operator Notification*:
+    - Preflight must detect and warn whether a reliable write freeze is achievable.
+    - If live writes are detected during batching (verified by comparing table modification timestamps or post count deltas before and after export), SiteConvoy **flags the export as potentially inconsistent**.
+    - The archive manifest documents the mutation warning, and the destination importer will display an explicit confirmation gate requiring the operator to review potential live-write drift before applying mutations.
 
 ---
 
@@ -171,4 +193,4 @@ The following empirical investigations require executable test harnesses and are
 1. **Large Serialized Data Benchmark**: Verify memory overhead of recursive JSON/serialized search-and-replace engines on 500MB+ options tables.
 2. **Chunked Streaming Archive Extraction**: Validate streaming Tar/Gzip decompression under PHP shared-hosting memory constraints (64MB / 128MB).
 3. **DDL Transaction Simulation**: Measure failure recovery behavior when `DROP TABLE` or `RENAME TABLE` fails mid-sequence on MariaDB vs MySQL 8.0.
-4. **Live Mutation Skew Test**: Simulate simultaneous post publishing during multi-step batch export to measure manifest discrepancies.
+4. **Live Mutation Skew & Write Freeze Test**: Measure REST API write gating and manifest drift detection during active export.

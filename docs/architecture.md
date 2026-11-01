@@ -3,7 +3,7 @@
 > [!NOTE]
 > **Status: PROPOSED / UNVALIDATED DESIGN**  
 > **Task Reference:** `SITECONVOY-M0-002`  
-> The architectural models and technical designs described in this document represent the planned design for SiteConvoy version 1.0. Sourced from empirical core research and primary WordPress documentation. All items are design goals subject to empirical validation in future milestones.
+> The architectural models and technical designs described in this document represent the planned design for SiteConvoy version 1.0. Sourced from primary WordPress core documentation and source codebase research. All items are design goals subject to empirical validation in future milestones.
 
 ---
 
@@ -19,8 +19,9 @@ SiteConvoy is structured around a pipeline of modular, decoupled subsystems:
 |  2. Backup & Checkpointing --> Establish restore points, durable disk journal     |
 |  3. Archive Packaging      --> Chunked extraction, streaming compression, SHA256  |
 |  4. Transform Engine       --> Table prefix rewrite, user review, serialization   |
-|  5. Filesystem Manager     --> Media translocation, containment & atomic rename   |
-|  6. Recovery & Rollback    --> Best-effort compensation, journaled manual recovery|
+|  5. Asset & Theme Provision--> Themes, plugins, mu-plugins, drop-ins, translations|
+|  6. Filesystem Manager     --> Media translocation, containment & atomic rename   |
+|  7. Recovery & Rollback    --> Best-effort compensation, journaled manual recovery|
 +-----------------------------------------------------------------------------------+
 ```
 
@@ -62,6 +63,9 @@ SiteConvoy executes migrations according to a deterministic state machine, ensur
 [STAGING_FILES]     ---- (Extract/Disk Error) -> [CLEANUP_STAGING] (Purge tmp/)
     |
     v
+[PROVISIONING_ASSETS] -- (Missing Dep / Incompat) -> [BLOCKED_DEPENDENCY]
+    |
+    v
 [TRANSFORMING_DB]   ---- (SQL Failure) --------> [COMPENSATING_ROLLBACK] (Drop staged tables)
     |
     v
@@ -75,7 +79,7 @@ SiteConvoy executes migrations according to a deterministic state machine, ensur
 ```
 
 ### Destination Mutation Boundary
-- **Zero-Mutation Stages**: `INITIATED`, `PREFLIGHT_RUNNING`, `PREFLIGHT_PASSED`, `BACKUP_CREATING`, `PACKAGING`, `VERIFYING_CHECKSUM`, `TRUST_APPROVAL`, `STAGING_FILES`. At these stages, target live tables and media directories are completely untouched.
+- **Zero-Mutation Stages**: `INITIATED`, `PREFLIGHT_RUNNING`, `PREFLIGHT_PASSED`, `BACKUP_CREATING`, `PACKAGING`, `VERIFYING_CHECKSUM`, `TRUST_APPROVAL`, `STAGING_FILES`, `PROVISIONING_ASSETS`. At these stages, target live tables and live content directories remain completely untouched.
 - **Controlled-Mutation Stages**: `TRANSFORMING_DB` (operates on staged tables or restore points), `COMMITTING_FILES` (swaps files from `tmp/`).
 
 ---
@@ -95,8 +99,14 @@ archive-siteconvoy-20261101-123456.tar.gz
 │   │   ├── postmeta.sql
 │   │   └── options.sql
 │   └── users.sql
-└── uploads/
-    └── [media files tree...]
+├── uploads/
+│   └── [media files tree...]
+└── assets/
+    ├── plugins/
+    ├── themes/
+    ├── mu-plugins/
+    ├── drop-ins/
+    └── languages/
 ```
 
 ### Manifest Schema (`manifest.json`)
@@ -123,6 +133,17 @@ archive-siteconvoy-20261101-123456.tar.gz
   "media_summary": {
     "file_count": 45,
     "total_bytes": 15420310
+  },
+  "assets_manifest": {
+    "themes": [
+      { "slug": "twentytwentyfour", "version": "1.2", "parent": null }
+    ],
+    "plugins": [
+      { "slug": "woocommerce", "file": "woocommerce/woocommerce.php", "version": "9.3.0", "network_active": false }
+    ],
+    "mu_plugins": [],
+    "drop_ins": [],
+    "languages": ["en_US"]
   }
 }
 ```
@@ -133,27 +154,40 @@ archive-siteconvoy-20261101-123456.tar.gz
 
 ### 4.1 Database Table Isolation & Dynamic Prefix Discovery
 - Naive tools assume hardcoded `wp_` or `wp_{id}_` prefixes.
-- SiteConvoy queries [`wpdb::tables()`](https://developer.wordpress.org/reference/classes/wpdb/tables/) and [`wpdb::get_blog_prefix( $blog_id )`](https://developer.wordpress.org/reference/classes/wpdb/get_blog_prefix/) to derive exact table names. Note that calling `$wpdb->tables('global')` on multisite returns both shared users and `ms_global` governance tables, while `$scope = 'ms_global'` provides an isolated catalog.
+- SiteConvoy queries [`wpdb::tables()`](https://developer.wordpress.org/reference/classes/wpdb/tables/) and [`wpdb::get_blog_prefix( $blog_id )`](https://developer.wordpress.org/reference/classes/wpdb/get_blog_prefix/) to derive exact table names. Calling `$wpdb->tables('global')` on multisite returns both shared users and `ms_global` governance tables, while `$scope = 'ms_global'` provides an isolated catalog.
 - Tables are transformed with strict boundaries to avoid accidental replacement in column data.
 
 ### 4.2 Main Site (Site ID 1) Asymmetry
 - Site ID 1 subsite tables share names with global network tables (`wp_posts`, `wp_options` alongside `wp_users`, `wp_blogs`, `wp_site`, `wp_sitemeta`, `wp_signups`, `wp_registration_log`, `wp_blog_versions`).
 - Naive export captures network state. SiteConvoy enforces explicit inclusion lists separating subsite tables from `ms_global` tables and purges network-only keys (`active_sitewide_plugins`) from options.
 
-### 4.3 Identity Resolution & User Protection
+### 4.3 Asset Discovery, Provisioning, and Dependency Management
+In full-network migrations (and subsite moves where custom code is required), SiteConvoy implements rigorous asset discovery:
+1. **Themes & Child Themes**:
+   - Inspects both active themes on individual subsites and network-enabled themes in `wp_sitemeta` (`allowedthemes`).
+   - Detects parent-child relationships; if a child theme is present, the parent theme directory must also be discovered and transferred.
+2. **Plugins & Network Activation**:
+   - Inspects `active_sitewide_plugins` in `wp_sitemeta` and active plugins in `wp_{id}_options`.
+   - Distinguishes network-activated plugins (which must retain network activation on destination) from per-site activations.
+3. **Must-Use Plugins (`mu-plugins`) & Drop-Ins**:
+   - Scans `wp-content/mu-plugins/` and core drop-in files (`db.php`, `object-cache.php`, `advanced-cache.php`, `sunrise.php`).
+   - *Safety Rule*: Drop-ins that bind directly to host infrastructure (e.g. host-specific Redis/Memcached drop-ins or custom database drivers) are flagged during preflight. If incompatible with the destination environment, migration is **BLOCKED / WARNED** rather than silently deploying broken execution hooks.
+4. **Translations & Custom Content**:
+   - Scans `wp-content/languages/` and custom directories defined by `WP_CONTENT_DIR` or plugin constants.
+5. **Dependency Validation**:
+   - If required themes or plugins cannot be transferred (e.g. due to filesystem permission constraints or archive omission), the importer validates whether matching dependencies exist on the target. If absent, the migration enters `BLOCKED_DEPENDENCY` state and halts before mutating destination content.
+
+### 4.4 Identity Resolution & User Protection
 - Source multisite users are shared. SiteConvoy extracts only users with explicit roles or authorship ties on the site.
 - **Security Rule**: Silent account linking and automatic privilege escalation are prohibited. Collision review is required by a trusted network admin. Super-admin rights are never imported.
 
-### 4.4 Data Search-and-Replace & GUID Preservation
+### 4.5 Data Search-and-Replace & GUID Preservation
 - Serialized PHP objects and JSON strings are recursively unserialized, transformed, and reserialized with character-length verification.
 - In accordance with WordPress core migration standards and WP-CLI (`--skip-columns=guid`), `wp_posts.guid` entries are immutable identifiers and **must not be rewritten**.
 
-### 4.5 Media Filesystem Management & Containment
+### 4.6 Media Filesystem Management & Containment
 - Media paths are mapped cleanly between `wp-content/uploads/sites/{id}/` (multisite) and `wp-content/uploads/` (standalone), synchronizing attachment metadata without altering existing GUIDs.
 - Filesystem extraction validates entry normalization and enforces directory containment inside `tmp/`, rejecting symlinks and hardlinks pointing outside the sandbox.
-
-### 4.6 Extension Adapters & Third-Party Table Hooks
-- Extensible adapter architecture across all four modes allowing third-party plugins (e.g. WooCommerce, SEO plugins) to hook into preflight discovery, table classification, and URL replacement pipelines.
 
 ### 4.7 Tested Reliability & Recovery Goals
 - Universal atomic rollback is impossible across non-transactional MySQL operations (DDL) and disparate filesystems.

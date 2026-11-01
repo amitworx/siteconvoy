@@ -3,7 +3,7 @@
 > [!NOTE]
 > **Task Reference:** `SITECONVOY-M0-002`  
 > **Status:** PROPOSED RESEARCH SPECIFICATION  
-> Sourced from official WordPress core APIs (`wpdb::tables()`, `wpdb::get_blog_prefix()`, `wp_get_db_schema()`) and empirical database analysis. This inventory establishes the foundational boundaries between global network data, site-specific subsite data, shared identities, and third-party plugin tables.
+> Sourced from official WordPress core APIs (`wpdb::tables()`, `wpdb::get_blog_prefix()`, `wp_get_db_schema()`) and primary core codebase research. Empirical testing and database verification remain scheduled for Milestone M1+. This inventory establishes the foundational boundaries between global network data, site-specific subsite data, shared identities, and third-party plugin tables.
 
 ---
 

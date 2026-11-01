@@ -41,6 +41,10 @@ To thoroughly validate all four migration directions, the test harness requires 
   - Site ID 1 (Main Site): Standard root prefix `wp_`, custom posts, network options.
   - Site ID 2 (Subsite): Prefix `wp_2_`, 50 posts, 20 media attachments, custom post type.
   - Site ID 3 (Large Subsite): Prefix `wp_3_`, 500 posts, complex serialized metadata.
+- Assets:
+  - Parent theme (`twentytwentyfour`) and active child theme on Site 2.
+  - Network-activated plugin (`siteconvoy-test-sitewide`) and per-site plugin.
+  - Must-use plugin (`mu-plugins/security-check.php`).
 - Users:
   - User 1: Super Admin (`admin_a@network-a.local`)
   - User 2: Author on Site 2 only (`author_site2@network-a.local`)
@@ -95,6 +99,11 @@ To thoroughly validate all four migration directions, the test harness requires 
   - URLs updated across all subsites.
   - All post GUIDs preserved.
   - Super admin access preserved on new domain.
+  - **Asset Completeness Verification**:
+    - Network-activated plugins are restored and marked sitewide active in target `sitemeta`.
+    - Both child theme and its required parent theme are provisioned in `wp-content/themes/`.
+    - Must-use plugins in `wp-content/mu-plugins/` are transferred.
+    - Missing drop-in dependencies or incompatible host drivers trigger clear preflight warnings.
 
 ### Scenario 5: Standalone to Multisite Subsite (Direction 4)
 - **Input**: Standalone WordPress imported into Network B.
@@ -110,12 +119,12 @@ To thoroughly validate all four migration directions, the test harness requires 
   - If offloaded object sync is unconfigured, migration is **BLOCKED / FLAGGED INCOMPLETE** with clear diagnostic warning.
   - Zero silent data loss or empty media references on target.
 
-### Scenario 7: Live Source Mutations During Batch Export
-- **Input**: Source site subjected to continuous synthetic writes (publishing new posts/comments) during chunked database export.
+### Scenario 7: Live Source Writes & Write Freeze Verification
+- **Input**: Source site subjected to continuous synthetic REST API write requests and simulated background cron jobs during export.
 - **Verification Gates**:
-  - Exporter checks consistency manifests.
-  - Manifest logs warnings for out-of-sync foreign key references.
-  - Preflight recommends or enforces maintenance window mode.
+  - Migration write freeze is activated: REST API write endpoints return HTTP 503; WP-Cron spawning is disabled.
+  - Preflight warns if reliable write freeze cannot be established.
+  - If background writes occur, export manifest logs live-write drift warning, triggering operator review gate on target.
 
 ---
 
@@ -130,3 +139,4 @@ To ensure the reliability design goals are verified without making false assumpt
 | **PHP Fatal Out-of-Memory (OOM)** | Batch serialized replace | Process killed immediately (cannot run cleanup handlers). **Recovery**: Checkpoints are persisted *prior* to batch execution. Upon process restart, the runner inspects durable disk journal and resumes from last safe checkpoint. |
 | **Corrupted SHA-256 Checksum** | Package verification | Extraction aborted before any files or database tables are modified. |
 | **Untrusted / Replaced Archive** | Trust review | Valid internal checksum but unconfirmed out-of-band digest requires explicit admin trust approval before staging. |
+| **Missing Asset Dependency** | Asset provisioning | Missing parent theme or incompatible drop-in transitions to `BLOCKED_DEPENDENCY` before live database or filesystem mutation. |
