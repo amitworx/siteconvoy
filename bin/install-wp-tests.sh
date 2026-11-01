@@ -51,7 +51,7 @@ mkdir -p "$WP_TESTS_DIR"
 if [ ! -f "${WP_TESTS_DIR}/includes/functions.php" ]; then
 	WP_DEVELOP_TMP=$(mktemp -d)
 	git clone --depth=1 --filter=blob:none --sparse --branch "$WP_GIT_REF" https://github.com/WordPress/wordpress-develop.git "$WP_DEVELOP_TMP"
-	git -C "$WP_DEVELOP_TMP" sparse-checkout set tests/phpunit/includes tests/phpunit/data wp-tests-config-sample.php
+	git -C "$WP_DEVELOP_TMP" sparse-checkout set tests/phpunit/includes tests/phpunit/data
 	cp -R "${WP_DEVELOP_TMP}/tests/phpunit/includes" "${WP_TESTS_DIR}/includes"
 	cp -R "${WP_DEVELOP_TMP}/tests/phpunit/data" "${WP_TESTS_DIR}/data"
 	cp "${WP_DEVELOP_TMP}/wp-tests-config-sample.php" "${WP_TESTS_DIR}/wp-tests-config-sample.php"
