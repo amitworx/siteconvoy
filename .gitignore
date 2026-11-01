@@ -13,6 +13,8 @@ Thumbs.db
 vendor/
 node_modules/
 *.log
+.phpunit.result.cache
+.phpcs.cache
 
 # Build Outputs (Packaging Note: WordPress plugin release ZIPs/assets must not be obscured)
 # Specific build cache directories may be ignored, but ensure plugin release distributions are retained if tracked

@@ -1,0 +1,43 @@
+{
+  "name": "amitworx/siteconvoy",
+  "description": "WordPress multisite migration plugin",
+  "license": "GPL-2.0-or-later",
+  "type": "wordpress-plugin",
+  "authors": [
+    {
+      "name": "Amit Sharma",
+      "email": "amitworx@gmail.com"
+    }
+  ],
+  "require": {
+    "php": ">=7.4"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^9.6",
+    "yoast/phpunit-polyfills": "^2.0 || ^3.0",
+    "wp-coding-standards/wpcs": "^3.1",
+    "dealerdirect/phpcodesniffer-composer-installer": "^1.0",
+    "php-parallel-lint/php-parallel-lint": "^1.4"
+  },
+  "config": {
+    "allow-plugins": {
+      "dealerdirect/phpcodesniffer-composer-installer": true
+    },
+    "platform": {
+      "php": "8.2.10"
+    }
+  },
+  "scripts": {
+    "lint:php": "parallel-lint --exclude vendor --exclude node_modules --exclude .git --exclude tmp .",
+    "lint:wpcs": "phpcs -s",
+    "lint:wpcs:fix": "phpcbf",
+    "test": "phpunit -c phpunit.xml.dist",
+    "test:unit": "phpunit --filter PluginUnitTest",
+    "test:multisite": "phpunit -c phpunit-multisite.xml.dist",
+    "check": [
+      "@lint:php",
+      "@lint:wpcs",
+      "@test:unit"
+    ]
+  }
+}

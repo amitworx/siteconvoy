@@ -24,22 +24,43 @@ The public repository (`amitworx/siteconvoy`) is the single source of truth for 
 
 ---
 
-## Local Setup
+## Local Setup & Verification
 
-Detailed environment setup (such as Composer dependencies, Docker/wp-env multisite test harnesses, and PHPUnit configurations) is currently **TBD** as milestone M0 establishes project governance and documentation only.
+See the [Local Development & Test Environment Guide](docs/development-environment.md) for full setup, Windows PowerShell and POSIX commands, synthetic fixture provisioning, and topology notes.
 
-When executable runtime development begins:
-- A supported PHP CLI and Composer will be required for linting and unit testing.
-- A local WordPress Multisite testing environment (subdomain and subdirectory configurations) will be provided for integration tests.
+Quick-start summary:
+
+```powershell
+# Install PHP and Node dev dependencies
+composer install
+npm install
+
+# Run PHP syntax check, WordPress Coding Standards (WPCS), and fast unit tests
+composer check
+
+# Start the local Docker WordPress environments (@wordpress/env)
+npm run env:start
+
+# Seed deterministic synthetic fixtures (Multisite Site 1 + Site 2, and Standalone)
+npm run env:fixtures:multisite
+npm run env:fixtures:standalone
+
+# Run real WordPress PHPUnit integration tests (Single-Site + Multisite)
+npm run test:wp
+```
 
 ---
 
 ## Submitting Pull Requests
 
 1. Fork the repository and create a descriptive branch (e.g., `feature/my-enhancement` or `fix/issue-description`).
-2. Ensure changes follow the coding standards and documentation styles:
-   - Run `git diff --check` to avoid whitespace errors.
-   - Ensure markdown links are valid relative links.
-3. Keep pull requests focused on a single concern or assigned task.
-4. Submit pull requests as drafts if they represent work in progress or require architectural review.
-5. Provide a clear description of changes, rationale, and reproducible testing evidence in the PR body.
+2. Follow strict TDD (write failing test first, implement minimal code, refactor).
+3. Ensure all quality gates pass before opening or updating a pull request:
+   - `git diff --check`
+   - `composer validate --strict`
+   - `composer run lint:php`
+   - `composer run lint:wpcs`
+   - `npm run test:wp`
+4. Keep pull requests focused on a single concern or assigned task.
+5. Submit pull requests as drafts if they represent work in progress or require architectural review.
+6. Provide a clear description of changes, rationale, and reproducible testing evidence in the PR body.

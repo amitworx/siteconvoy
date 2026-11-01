@@ -1,0 +1,25 @@
+{
+  "name": "siteconvoy",
+  "version": "0.1.0",
+  "description": "WordPress multisite migration plugin local development and testing environment",
+  "private": true,
+  "scripts": {
+    "env:start": "wp-env start",
+    "env:start:standalone": "wp-env start --config=.wp-env.standalone.json",
+    "env:stop": "wp-env stop",
+    "env:clean": "wp-env clean all",
+    "env:fixtures:multisite": "wp-env run cli wp eval-file wp-content/plugins/siteconvoy/bin/setup-fixtures.php",
+    "env:fixtures:standalone": "wp-env run tests-cli wp eval-file wp-content/plugins/siteconvoy/bin/setup-fixtures.php",
+    "env:cli": "wp-env run cli wp",
+    "env:tests": "wp-env run tests-cli wp",
+    "test:unit": "composer run-script test:unit",
+    "test:wp:single": "wp-env run tests-cli --env-cwd=wp-content/plugins/siteconvoy vendor/bin/phpunit -c phpunit.xml.dist",
+    "test:wp:multisite": "wp-env run tests-cli --env-cwd=wp-content/plugins/siteconvoy vendor/bin/phpunit -c phpunit-multisite.xml.dist",
+    "test:wp": "npm run test:wp:single && npm run test:wp:multisite",
+    "lint:php": "composer run-script lint:php",
+    "lint:wpcs": "composer run-script lint:wpcs"
+  },
+  "devDependencies": {
+    "@wordpress/env": "^12.0.0"
+  }
+}

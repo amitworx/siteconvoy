@@ -1,9 +1,9 @@
 # SiteConvoy Testing Strategy & Fixture Specification
 
 > [!NOTE]
-> **Task Reference:** `SITECONVOY-M0-002`  
-> **Status:** PROPOSED TESTING STRATEGY  
-> This specification outlines the automated testing pyramid, environment requirements, synthetic fixtures, fault injection scenarios, and test-driven development (TDD) gates planned for milestone M1 and beyond. **No executable test code is implemented in milestone M0.**
+> **Task Reference:** `SITECONVOY-M0-002` / `SITECONVOY-M1-001`
+> **Status:** ACTIVE BASELINE HARNESS (`M1-001`) + PLANNED MIGRATION SCENARIOS (`M2+`)
+> Milestone `SITECONVOY-M1-001` establishes the reproducible `@wordpress/env` local Docker harness, PHPCS/WPCS ruleset, GitHub Actions CI matrix, and initial PHPUnit WordPress integration smoke tests (`tests/PluginUnitTest.php` and `tests/PluginBootstrapTest.php`). See [Local Development & Test Environment Guide](development-environment.md) for executable commands and current topology coverage. End-to-end migration scenarios (Section 3) and fault injection tests (Section 4) remain planned for Milestone M2 and beyond.
 
 ---
 
@@ -27,6 +27,17 @@ Starting in milestone M1, all executable code follows the Red/Green/Refactor cyc
 2. **Green**: Write the minimal code required to pass the test.
 3. **Refactor**: Clean code and optimize performance while maintaining green tests.
 4. **Regression**: Run the full suite across all supported PHP and WordPress versions.
+
+### 1.2 Implemented Baseline Test Suite (`SITECONVOY-M1-001`)
+- **Pure Unit Smoke Tests (`tests/PluginUnitTest.php`)**: Runs via `composer run test:unit` without a database to verify `siteconvoy.php` existence, plugin headers, and bootstrap symbol definitions.
+- **WordPress Runtime Integration Tests (`tests/PluginBootstrapTest.php`)**: Runs against a real WordPress + MariaDB installation in both **Standalone** (`phpunit.xml.dist`, `npm run test:wp:single`) and **Multisite** (`phpunit-multisite.xml.dist`, `npm run test:wp:multisite`) modes. Verifies:
+  - WordPress plugin header parsing (`get_plugin_data()`).
+  - Inert bootstrap execution (zero scheduled crons, options, or admin menus).
+  - Single-site vs. multisite runtime context (`is_multisite()`).
+  - Dynamic `$wpdb->base_prefix` and `$wpdb->get_blog_prefix( $site_id )` resolution without assuming hardcoded `wp_`.
+  - Separation of `ms_global` tables (`wp_blogs`, `wp_site`, `wp_sitemeta`) from Site ID 1 `blog` tables.
+  - Deterministic subsite creation (Site ID >= 2) and option isolation between Site ID 1 and Site ID 2, covering both subdirectory and subdomain subsite records in `WP_UnitTestCase`.
+- **Topology Coverage Note**: Local `@wordpress/env` (`npm run env:start`) automatically provisions a live **Subdirectory Multisite** network (`http://localhost:9080/` and `http://localhost:9080/subsite/`) and a **Standalone** instance (`http://localhost:9081/`). Because `@wordpress/env` binds to single-label `localhost` and WordPress core requires a dotted domain plus wildcard/host DNS resolution for live HTTP `SUBDOMAIN_INSTALL` routing, full HTTP subdomain container routing requires the manual host/WP-CLI setup documented in [Section 6.2 of `docs/development-environment.md`](development-environment.md#62-wp-env-localhost-subdomain-limitation--actionable-subdomain-setup).
 
 ---
 
