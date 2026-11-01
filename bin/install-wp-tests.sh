@@ -19,24 +19,24 @@ set -ex
 
 if [[ $WP_VERSION =~ ^[0-9]+\.[0-9]+\-(beta|RC)[0-9]+$ ]]; then
 	WP_BRANCH=${WP_VERSION%\-*}
-	WP_TESTS_TAG="branches/$WP_BRANCH"
+	WP_GIT_REF="$WP_BRANCH"
 elif [[ $WP_VERSION =~ ^[0-9]+\.[0-9]+$ ]]; then
-	WP_TESTS_TAG="branches/$WP_VERSION"
-elif [[ $WP_VERSION =~ [0-9]+\.[0-9]+\.[0-9]+ ]]; then
-	if [[ $WP_VERSION =~ [0-9]+\.[0-9]+\.[0] ]]; then
-		WP_TESTS_TAG="tags/${WP_VERSION%??}"
+	WP_GIT_REF="$WP_VERSION"
+elif [[ $WP_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+	if [[ $WP_VERSION =~ ^[0-9]+\.[0-9]+\.0$ ]]; then
+		WP_GIT_REF="${WP_VERSION%.0}"
 	else
-		WP_TESTS_TAG="tags/$WP_VERSION"
+		WP_GIT_REF="$WP_VERSION"
 	fi
 elif [[ $WP_VERSION == 'nightly' || $WP_VERSION == 'trunk' ]]; then
-	WP_TESTS_TAG="trunk"
+	WP_GIT_REF="trunk"
 else
 	# Resolve latest stable version from WordPress.org API.
 	WP_VERSION=$(curl -s https://api.wordpress.org/core/version-check/1.7/ | grep -o '"version":"[^"]*"' | head -n 1 | sed 's/"version":"//;s/"//')
 	if [[ $WP_VERSION =~ ^[0-9]+\.[0-9]+\.0$ ]]; then
-		WP_TESTS_TAG="tags/${WP_VERSION%.0}"
+		WP_GIT_REF="${WP_VERSION%.0}"
 	else
-		WP_TESTS_TAG="tags/$WP_VERSION"
+		WP_GIT_REF="$WP_VERSION"
 	fi
 fi
 
@@ -49,12 +49,17 @@ fi
 mkdir -p "$WP_TESTS_DIR"
 
 if [ ! -f "${WP_TESTS_DIR}/includes/functions.php" ]; then
-	svn export --quiet --ignore-externals "https://develop.svn.wordpress.org/${WP_TESTS_TAG}/tests/phpunit/includes/" "${WP_TESTS_DIR}/includes"
-	svn export --quiet --ignore-externals "https://develop.svn.wordpress.org/${WP_TESTS_TAG}/tests/phpunit/data/" "${WP_TESTS_DIR}/data"
+	WP_DEVELOP_TMP=$(mktemp -d)
+	git clone --depth=1 --filter=blob:none --sparse --branch "$WP_GIT_REF" https://github.com/WordPress/wordpress-develop.git "$WP_DEVELOP_TMP"
+	git -C "$WP_DEVELOP_TMP" sparse-checkout set tests/phpunit/includes tests/phpunit/data wp-tests-config-sample.php
+	cp -R "${WP_DEVELOP_TMP}/tests/phpunit/includes" "${WP_TESTS_DIR}/includes"
+	cp -R "${WP_DEVELOP_TMP}/tests/phpunit/data" "${WP_TESTS_DIR}/data"
+	cp "${WP_DEVELOP_TMP}/wp-tests-config-sample.php" "${WP_TESTS_DIR}/wp-tests-config-sample.php"
+	rm -rf "$WP_DEVELOP_TMP"
 fi
 
 if [ ! -f "${WP_TESTS_DIR}/wp-tests-config.php" ]; then
-	curl -sL "https://develop.svn.wordpress.org/${WP_TESTS_TAG}/wp-tests-config-sample.php" -o "${WP_TESTS_DIR}/wp-tests-config.php"
+	cp "${WP_TESTS_DIR}/wp-tests-config-sample.php" "${WP_TESTS_DIR}/wp-tests-config.php"
 	sed -i "s:dirname( __FILE__ ) . '/src/':'${WP_CORE_DIR}/':" "${WP_TESTS_DIR}/wp-tests-config.php"
 	sed -i "s:__DIR__ . '/src/':'${WP_CORE_DIR}/':" "${WP_TESTS_DIR}/wp-tests-config.php"
 	sed -i "s/youremptytestdbnamehere/$DB_NAME/" "${WP_TESTS_DIR}/wp-tests-config.php"
