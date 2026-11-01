@@ -30,16 +30,21 @@ SiteConvoy is being designed to provide reliable, verifiable, and transparent mi
 
 ---
 
-## Current Status
+## Current Status & Documentation
 
 - **Status**: Pre-release / Nonfunctional Foundation (Milestone M0).
 - **Executable Code**: None. There is currently no executable PHP runtime code or user interface.
 - **Prerequisites & System Requirements**: TBD (Targeting supported PHP and WordPress core versions; exact matrix to be determined during milestone M1).
 
-For details on the project roadmap, architectural designs, and migration specifications, see:
+For details on the project roadmap, architectural designs, research, and migration specifications, see:
 - [Roadmap](docs/roadmap.md)
-- [Architecture & Risk Analysis](docs/architecture.md)
-- [Migration Matrix](docs/migration-matrix.md)
+- [Architecture & Subsystem Specification](docs/architecture.md)
+- [Migration Matrix & Acceptance Criteria](docs/migration-matrix.md)
+- [Testing Strategy & Synthetic Fixtures](docs/test-strategy.md)
+- [Research: WordPress Core Data Inventory](docs/research/core-data-inventory.md)
+- [Research: Migration Feasibility Analysis](docs/research/migration-feasibility.md)
+- [Research: Security & Threat Model](docs/research/security-threat-model.md)
+- [Research: Primary Sources Bibliography](docs/research/sources.md)
 
 ---
 
