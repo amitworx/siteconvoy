@@ -2,20 +2,141 @@
 /**
  * Deterministic Synthetic Fixture Provisioning Script for SiteConvoy Local Environments.
  *
- * Executed via WP-CLI: wp eval-file wp-content/plugins/siteconvoy/bin/setup-fixtures.php
+ * Executed via WP-CLI:
+ *   wp eval-file wp-content/plugins/siteconvoy/bin/setup-fixtures.php allow-test-fixtures
+ *
+ * Fail-closed safety guards require:
+ *   1. Execution via WP-CLI.
+ *   2. Explicit opt-in argument 'allow-test-fixtures' or env SITECONVOY_ALLOW_TEST_FIXTURES=1.
+ *   3. Confirmed local/test environment type (wp_get_environment_type() in {'local', 'development', 'test'}).
+ *   4. Confirmed local/synthetic host domain (localhost, 127.0.0.1, *.local, *.test, example.org).
  *
  * Uses only synthetic test data. Never runs against production.
  *
  * @package SiteConvoy
  */
 
+/**
+ * Check whether a hostname is a safe local or RFC 2606 / 6761 test hostname.
+ *
+ * @param string $host Hostname to validate.
+ * @return bool True if safe local/test host, false otherwise.
+ */
+function siteconvoy_is_safe_fixture_host( $host ) {
+	$host = strtolower( trim( (string) $host ) );
+	if ( '' === $host ) {
+		return false;
+	}
+
+	$exact_allowed = array( 'localhost', '127.0.0.1', 'example.org', 'example.com', 'example.net' );
+	if ( in_array( $host, $exact_allowed, true ) ) {
+		return true;
+	}
+
+	$suffix_allowed = array( '.localhost', '.local', '.test', '.example.org', '.example.com', '.invalid' );
+	foreach ( $suffix_allowed as $suffix ) {
+		if ( substr( $host, -strlen( $suffix ) ) === $suffix ) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+/**
+ * Validate whether the current environment is safe for synthetic fixture provisioning.
+ *
+ * Fails closed unless:
+ *   1. Explicit opt-in ('allow-test-fixtures' in $cli_args or $env_opt_in === true).
+ *   2. $env_type is in {'local', 'development', 'test'}.
+ *   3. Both $home_host and $site_host are safe local/RFC-reserved test hostnames.
+ *
+ * @param array  $cli_args   Positional arguments passed to the script.
+ * @param bool   $env_opt_in Whether SITECONVOY_ALLOW_TEST_FIXTURES is enabled.
+ * @param string $env_type   WordPress environment type (e.g. from wp_get_environment_type()).
+ * @param string $home_host  Host parsed from home_url().
+ * @param string $site_host  Host parsed from site_url().
+ * @return array{allowed: bool, reason: string} Validation result and human-readable failure reason.
+ */
+function siteconvoy_validate_fixture_context( array $cli_args, $env_opt_in, $env_type, $home_host, $site_host ) {
+	$has_opt_in = in_array( 'allow-test-fixtures', $cli_args, true ) || true === $env_opt_in;
+	if ( ! $has_opt_in ) {
+		return array(
+			'allowed' => false,
+			'reason'  => 'Refusing to provision synthetic fixtures without explicit opt-in. ' .
+				'Pass "allow-test-fixtures" to wp eval-file (e.g. wp eval-file wp-content/plugins/siteconvoy/bin/setup-fixtures.php allow-test-fixtures) ' .
+				'or set SITECONVOY_ALLOW_TEST_FIXTURES=1.',
+		);
+	}
+
+	$allowed_envs = array( 'local', 'development', 'test' );
+	if ( ! in_array( $env_type, $allowed_envs, true ) ) {
+		return array(
+			'allowed' => false,
+			'reason'  => sprintf(
+				'Refusing to provision synthetic fixtures in "%s" environment. Allowed WP_ENVIRONMENT_TYPE values: %s.',
+				$env_type,
+				implode( ', ', $allowed_envs )
+			),
+		);
+	}
+
+	if ( ! siteconvoy_is_safe_fixture_host( $home_host ) || ! siteconvoy_is_safe_fixture_host( $site_host ) ) {
+		return array(
+			'allowed' => false,
+			'reason'  => sprintf(
+				'Refusing to provision synthetic fixtures on non-local/non-test host (home="%s", siteurl="%s").',
+				$home_host,
+				$site_host
+			),
+		);
+	}
+
+	return array(
+		'allowed' => true,
+		'reason'  => '',
+	);
+}
+
+// Allow unit/integration tests to load only the validation functions without running WP-CLI mutations.
+if ( defined( 'SITECONVOY_LOAD_FIXTURE_VALIDATOR_ONLY' ) && true === SITECONVOY_LOAD_FIXTURE_VALIDATOR_ONLY ) {
+	return;
+}
+
 if ( ! defined( 'ABSPATH' ) || ! defined( 'WP_CLI' ) || ! WP_CLI ) {
-	exit( "This script must be executed via WP-CLI (wp eval-file).\n" );
+	exit( "ERROR: This script must be executed via WP-CLI (wp eval-file).\n" );
+}
+
+$siteconvoy_cli_args   = isset( $args ) && is_array( $args ) ? $args : array();
+$siteconvoy_env_opt_in = '1' === getenv( 'SITECONVOY_ALLOW_TEST_FIXTURES' )
+	|| ( defined( 'SITECONVOY_ALLOW_TEST_FIXTURES' ) && true === SITECONVOY_ALLOW_TEST_FIXTURES );
+$siteconvoy_env_type   = function_exists( 'wp_get_environment_type' ) ? wp_get_environment_type() : 'production';
+$siteconvoy_home_host  = (string) wp_parse_url( home_url(), PHP_URL_HOST );
+$siteconvoy_site_host  = (string) wp_parse_url( site_url(), PHP_URL_HOST );
+
+$siteconvoy_validation = siteconvoy_validate_fixture_context(
+	$siteconvoy_cli_args,
+	$siteconvoy_env_opt_in,
+	$siteconvoy_env_type,
+	$siteconvoy_home_host,
+	$siteconvoy_site_host
+);
+
+if ( ! $siteconvoy_validation['allowed'] ) {
+	WP_CLI::error( $siteconvoy_validation['reason'] );
 }
 
 global $wpdb;
 
-WP_CLI::log( sprintf( 'Provisioning SiteConvoy synthetic fixtures (is_multisite=%s, base_prefix=%s)...', is_multisite() ? 'true' : 'false', $wpdb->base_prefix ) );
+WP_CLI::log(
+	sprintf(
+		'Provisioning SiteConvoy synthetic fixtures (env=%s, host=%s, is_multisite=%s, base_prefix=%s)...',
+		$siteconvoy_env_type,
+		$siteconvoy_home_host,
+		is_multisite() ? 'true' : 'false',
+		$wpdb->base_prefix
+	)
+);
 
 // Ensure SiteConvoy plugin is active.
 if ( ! function_exists( 'is_plugin_active' ) ) {

@@ -78,14 +78,24 @@ npx wp-env start --config=.wp-env.standalone.json
 
 ## 4. Provisioning Deterministic Synthetic Fixtures
 
-Once `wp-env` is running, seed the deterministic synthetic fixtures (Main Site ID 1, Subsite ID 2 at `/subsite/`, synthetic users `siteconvoy_author_site2` and `siteconvoy_editor_shared`, and synthetic posts) using [`bin/setup-fixtures.php`](../bin/setup-fixtures.php):
+Once `wp-env` is running, seed the deterministic synthetic fixtures (Main Site ID 1, Subsite ID 2 at `/subsite/`, synthetic users `siteconvoy_author_site2` and `siteconvoy_editor_shared`, and synthetic posts) using [`bin/setup-fixtures.php`](../bin/setup-fixtures.php).
+
+`bin/setup-fixtures.php` enforces **fail-closed safety guards** before mutating any database state:
+1. Must be executed via WP-CLI (`wp eval-file`).
+2. Requires explicit opt-in via the `allow-test-fixtures` positional argument (or `SITECONVOY_ALLOW_TEST_FIXTURES=1`).
+3. Requires `wp_get_environment_type()` to be one of `local`, `development`, or `test` (refuses `production` and `staging`).
+4. Requires `home_url()` and `site_url()` hostnames to be `localhost`, `127.0.0.1`, or RFC-reserved test domains (`*.local`, `*.test`, `example.org`, etc.).
 
 ```powershell
 # Provision Multisite (Subdirectory) fixtures on the development container (port 9080):
 npm run env:fixtures:multisite
+# Equivalent raw command:
+# npx wp-env run cli wp eval-file wp-content/plugins/siteconvoy/bin/setup-fixtures.php allow-test-fixtures
 
 # Provision Standalone fixtures on the test container (port 9081):
 npm run env:fixtures:standalone
+# Equivalent raw command:
+# npx wp-env run tests-cli wp eval-file wp-content/plugins/siteconvoy/bin/setup-fixtures.php allow-test-fixtures
 ```
 
 Verify the provisioned sites and plugin status via WP-CLI:
@@ -121,11 +131,15 @@ composer run lint:wpcs:fix
 
 ### 5.2 Fast Standalone Unit Tests (Host CLI)
 
-Runs `tests/PluginUnitTest.php` without requiring a database connection:
+Runs `tests/PluginUnitTest.php` via [`phpunit-unit.xml.dist`](../phpunit-unit.xml.dist) and [`tests/bootstrap-unit.php`](../tests/bootstrap-unit.php) without requiring a database connection:
 
 ```powershell
 composer run test:unit
 ```
+
+> [!NOTE]
+> **Fail-Closed Integration Bootstrap (`tests/bootstrap.php`):**
+> Running `vendor/bin/phpunit -c phpunit.xml.dist` or `phpunit-multisite.xml.dist` without a valid WordPress test suite (`WP_TESTS_DIR` or `/wordpress-phpunit`) fails closed immediately with a `RuntimeException` so missing WordPress test infrastructure is never misrepresented as passing integration tests.
 
 ### 5.3 Real WordPress PHPUnit Integration Tests (Docker `wp-env`)
 
@@ -155,10 +169,11 @@ npx wp-env run tests-cli --env-cwd=wp-content/plugins/siteconvoy vendor/bin/phpu
 
 ### 6.1 What Is Verified Automatically
 
-1. **Subdirectory Multisite Runtime & HTTP/WP-CLI (`wp-env`)**:
-   - Fully provisioned and verified out of the box on `http://localhost:9080/` (Site ID 1) and `http://localhost:9080/subsite/` (Site ID 2).
-2. **PHPUnit WordPress Integration Suite (`phpunit-multisite.xml.dist`)**:
-   - Executes against a real MariaDB database and tests both subdirectory-addressed subsites (`network-b.example.org/subdir-fixture/`) and subdomain-addressed subsites (`site2.network-a.example.org/`) created via `WP_UnitTestCase::factory()->blog->create()`, verifying `get_blog_details()`, dynamic `$wpdb->base_prefix`, and `$wpdb->get_blog_prefix( $site_id )`.
+1. **Real Subdirectory Multisite Runtime & HTTP/WP-CLI (`wp-env`)**:
+   - Fully provisioned and verified as a live subdirectory multisite network (`SUBDOMAIN_INSTALL = false`) on `http://localhost:9080/` (Site ID 1) and `http://localhost:9080/subsite/` (Site ID 2), as well as in the `phpunit-multisite.xml.dist` integration suite.
+2. **Database-Only Subdomain Subsite Records (`phpunit-multisite.xml.dist`)**:
+   - Inside the PHPUnit multisite integration suite (which runs with WordPress core's default `WP_TESTS_SUBDOMAIN_INSTALL = false`), `test_multisite_subdomain_and_subdirectory_subsite_addressing()` creates both subdirectory-addressed (`network-b.example.org/subdir-fixture/`) and subdomain-addressed (`site2.network-a.example.org/`) blog records in MariaDB via `WP_UnitTestCase::factory()->blog->create()`, verifying `wp_blogs` storage, `get_blog_details()`, dynamic `$wpdb->base_prefix`, and `$wpdb->get_blog_prefix( $site_id )`.
+   - **Important Distinction**: This database-level blog record test does **not** constitute a full `SUBDOMAIN_INSTALL = true` HTTP/rewrite runtime test.
 
 ### 6.2 `wp-env` Localhost Subdomain Limitation & Actionable Subdomain Setup
 
@@ -167,6 +182,10 @@ npx wp-env run tests-cli --env-cwd=wp-content/plugins/siteconvoy vendor/bin/phpu
 **Actionable WP-CLI / Docker Procedure for Full Subdomain HTTP/CLI Provisioning**:
 
 If you need to test HTTP/WP-CLI routing against an active `SUBDOMAIN_INSTALL` container environment:
+
+> [!WARNING]
+> **Destructive Database Reset Warning**
+> The `wp db reset --yes` command below drops all tables in the active `wp-env` development container database (`wordpress`) and erases all existing local site content in that container. Never run `wp db reset` outside an isolated local disposable container.
 
 1. Map `network-a.local`, `site1.network-a.local`, and `site2.network-a.local` to `127.0.0.1` in your host OS `hosts` file:
    - **Windows (Administrator PowerShell)**: `C:\Windows\System32\drivers\etc\hosts`
@@ -183,6 +202,10 @@ If you need to test HTTP/WP-CLI routing against an active `SUBDOMAIN_INSTALL` co
 ## 7. Resetting Fixtures, Stopping, and Teardown
 
 ### 7.1 Resetting Database State Safely
+
+> [!WARNING]
+> **Destructive Database Wipe Warning**
+> Running `npm run env:clean` (`npx wp-env clean all`) permanently wipes and re-initializes the local Docker databases for both the development and test containers. Only run this command on local disposable `wp-env` test environments.
 
 To wipe and re-initialize only the SiteConvoy Docker databases without deleting downloaded WordPress core images:
 

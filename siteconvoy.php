@@ -4,8 +4,8 @@
  * Plugin URI: https://github.com/amitworx/siteconvoy
  * Description: WordPress multisite migration plugin.
  * Version: 0.1.0-dev
- * Requires at least: 6.0
- * Requires PHP: 7.4
+ * Requires at least: 6.7
+ * Requires PHP: 8.1
  * Author: Amit Sharma
  * Author URI: https://github.com/amitworx
  * License: GPL-2.0-or-later

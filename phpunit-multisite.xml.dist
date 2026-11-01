@@ -14,6 +14,7 @@
     <php>
         <const name="WP_TESTS_PHPUNIT_POLYFILLS_PATH" value="vendor/yoast/phpunit-polyfills" />
         <const name="WP_TESTS_MULTISITE" value="1" />
+        <const name="SITECONVOY_LOAD_FIXTURE_VALIDATOR_ONLY" value="true" />
     </php>
     <testsuites>
         <testsuite name="SiteConvoy Multisite Test Suite">

@@ -35,8 +35,8 @@ SiteConvoy is being designed to provide reliable, verifiable, and transparent mi
 - **Status**: Pre-release / Nonfunctional Foundation (Milestone M1 — `SITECONVOY-M1-001`).
 - **Executable Code**: Minimal inert plugin bootstrap (`siteconvoy.php`) and automated test/CI harness only. **There is no migration engine or user interface yet.**
 - **Prerequisites & System Requirements**:
-  - Plugin header baseline: WordPress `>=6.0`, PHP `>=7.4`.
-  - Automated CI & local test harness verified on: WordPress `6.7`, PHP `8.1`, `8.2`, `8.3` (CI matrix) and local `@wordpress/env` (PHP `8.2`, MariaDB `11.8`).
+  - Declared and tested baseline (`siteconvoy.php` & `composer.json`): WordPress `>=6.7`, PHP `>=8.1`.
+  - Automated CI & local test harness verified on: WordPress `6.7`, PHP `8.1`, `8.2`, `8.3` (GitHub Actions CI matrix) and local `@wordpress/env` (PHP `8.2`, MariaDB `11.8`).
 
 For details on the project roadmap, local development environment, architectural designs, research, and migration specifications, see:
 - [Local Development & Test Environment Guide](docs/development-environment.md)

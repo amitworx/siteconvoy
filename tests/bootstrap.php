@@ -2,6 +2,10 @@
 /**
  * PHPUnit bootstrap file for SiteConvoy WordPress integration tests.
  *
+ * Requires a real WordPress test library and database connection. Fails closed
+ * if the WordPress test suite is unavailable so missing infrastructure is never
+ * misrepresented as passing integration tests.
+ *
  * @package SiteConvoy
  */
 
@@ -26,26 +30,29 @@ if ( ! file_exists( $siteconvoy_tests_dir . '/includes/functions.php' ) ) {
 	}
 }
 
-// Give access to tests_add_filter() function when running inside the WordPress test suite.
-if ( file_exists( $siteconvoy_tests_dir . '/includes/functions.php' ) ) {
-	require_once $siteconvoy_tests_dir . '/includes/functions.php';
-
-	/**
-	 * Manually load the plugin being tested.
-	 */
-	tests_add_filter(
-		'muplugins_loaded',
-		function () {
-			require dirname( __DIR__ ) . '/siteconvoy.php';
-		}
+if ( ! file_exists( $siteconvoy_tests_dir . '/includes/functions.php' ) ) {
+	throw new \RuntimeException(
+		sprintf(
+			"WordPress integration test suite not found at '%s/includes/functions.php'. " .
+			"Run integration tests inside wp-env ('npm run test:wp') or set WP_TESTS_DIR to a valid WordPress test library. " .
+			"For standalone unit tests without WordPress, run 'composer run test:unit'.",
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped
+			$siteconvoy_tests_dir
+		)
 	);
-
-	// Start up the WP testing environment.
-	require_once $siteconvoy_tests_dir . '/includes/bootstrap.php';
-} elseif ( ! class_exists( 'WP_UnitTestCase' ) ) {
-	/**
-	 * Fallback base class to allow standalone unit tests when WP test suite is not present.
-	 */
-	class WP_UnitTestCase extends \PHPUnit\Framework\TestCase {
-	}
 }
+
+require_once $siteconvoy_tests_dir . '/includes/functions.php';
+
+/**
+ * Manually load the plugin being tested.
+ */
+tests_add_filter(
+	'muplugins_loaded',
+	function () {
+		require dirname( __DIR__ ) . '/siteconvoy.php';
+	}
+);
+
+// Start up the WP testing environment.
+require_once $siteconvoy_tests_dir . '/includes/bootstrap.php';
