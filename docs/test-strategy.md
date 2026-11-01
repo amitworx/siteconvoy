@@ -1,9 +1,9 @@
 # SiteConvoy Testing Strategy & Fixture Specification
 
 > [!NOTE]
-> **Task Reference:** `SITECONVOY-M0-002` / `SITECONVOY-M1-001`
-> **Status:** ACTIVE BASELINE HARNESS (`M1-001`) + PLANNED MIGRATION SCENARIOS (`M2+`)
-> Milestone `SITECONVOY-M1-001` establishes the reproducible `@wordpress/env` local Docker harness, PHPCS/WPCS ruleset, GitHub Actions CI matrix, and initial PHPUnit WordPress integration smoke tests (`tests/PluginUnitTest.php` and `tests/PluginBootstrapTest.php`). See [Local Development & Test Environment Guide](development-environment.md) for executable commands and current topology coverage. End-to-end migration scenarios (Section 3) and fault injection tests (Section 4) remain planned for Milestone M2 and beyond.
+> **Task Reference:** `SITECONVOY-M0-002` / `SITECONVOY-M1-001` / `SITECONVOY-M1-002`
+> **Status:** ACTIVE BASELINE & DISCOVERY/PREFLIGHT HARNESS (`M1-001`, `M1-002`) + PLANNED MIGRATION SCENARIOS (`M2+`)
+> Milestones `SITECONVOY-M1-001` and `SITECONVOY-M1-002` establish the reproducible `@wordpress/env` local Docker harness, PHPCS/WPCS ruleset, GitHub Actions CI matrix, standalone unit tests (`tests/PluginUnitTest.php`, `tests/DiscoveryContractsUnitTest.php`), and WordPress integration tests (`tests/PluginBootstrapTest.php`, `tests/SourceDiscoveryAndPreflightTest.php`). See [Local Development & Test Environment Guide](development-environment.md) and [Read-Only Source Discovery & Preflight Contracts](discovery-preflight.md) for executable commands and contract specifications. End-to-end migration execution scenarios (Section 3) and fault injection tests (Section 4) remain planned for Milestone M2 and beyond.
 
 ---
 
@@ -28,15 +28,16 @@ Starting in milestone M1, all executable code follows the Red/Green/Refactor cyc
 3. **Refactor**: Clean code and optimize performance while maintaining green tests.
 4. **Regression**: Run the full suite across all supported PHP and WordPress versions.
 
-### 1.2 Implemented Baseline Test Suite (`SITECONVOY-M1-001`)
-- **Pure Unit Smoke Tests (`tests/PluginUnitTest.php`)**: Runs via `composer run test:unit` (`phpunit -c phpunit-unit.xml.dist`) without a database to verify `siteconvoy.php` existence, plugin headers (`Requires at least: 6.7`, `Requires PHP: 8.1`), the fail-closed `ABSPATH` direct-access guard, bootstrap symbol definitions, and the fail-closed safety guards in `bin/setup-fixtures.php`.
-- **WordPress Runtime Integration Tests (`tests/PluginBootstrapTest.php`)**: Runs against a real WordPress + MariaDB installation in both **Standalone** (`phpunit.xml.dist`, `npm run test:wp:single`) and **Multisite** (`phpunit-multisite.xml.dist`, `npm run test:wp:multisite`) modes. `tests/bootstrap.php` fails closed with a `RuntimeException` if the WordPress test suite (`WP_TESTS_DIR` / `/wordpress-phpunit`) is absent. Verifies:
+### 1.2 Implemented Baseline & Discovery/Preflight Test Suite (`SITECONVOY-M1-001` & `SITECONVOY-M1-002`)
+- **Pure Unit Tests (`tests/PluginUnitTest.php`, `tests/DiscoveryContractsUnitTest.php`)**: Runs via `composer run test:unit` (`phpunit -c phpunit-unit.xml.dist`) without a database to verify `siteconvoy.php` existence, plugin headers (`Requires at least: 6.7`, `Requires PHP: 8.1`), the fail-closed `ABSPATH` direct-access guard, bootstrap symbol definitions, fail-closed safety guards in `bin/setup-fixtures.php`, and the four `MigrationMode` contracts, `PreflightFinding` severity rules, and `PreflightReport` fail-closed invariants.
+- **WordPress Runtime Integration Tests (`tests/PluginBootstrapTest.php`, `tests/SourceDiscoveryAndPreflightTest.php`)**: Runs against a real WordPress + MariaDB installation in both **Standalone** (`phpunit.xml.dist`, `npm run test:wp:single`) and **Multisite** (`phpunit-multisite.xml.dist`, `npm run test:wp:multisite`) modes. `tests/bootstrap.php` fails closed with a `RuntimeException` if the WordPress test suite (`WP_TESTS_DIR` / `/wordpress-phpunit`) is absent. Verifies:
   - WordPress plugin header parsing (`get_plugin_data()`).
   - Inert bootstrap execution (zero scheduled crons, options, or admin menus).
   - Single-site vs. multisite runtime context (`is_multisite()`).
   - Dynamic `$wpdb->base_prefix` and `$wpdb->get_blog_prefix( $site_id )` resolution without assuming hardcoded `wp_`.
-  - Separation of `ms_global` tables (`wp_blogs`, `wp_site`, `wp_sitemeta`) from Site ID 1 `blog` tables.
+  - Separation of `ms_global` tables (`wp_blogs`, `wp_blogmeta`, `wp_site`, `wp_sitemeta`, `wp_signups`, `wp_registration_log`) from Site ID 1 `blog` tables, plus `old` tables (`sitecategories` on multisite) and legacy pre-3.0 MU tables (`blog_versions`).
   - Deterministic subsite creation (Site ID >= 2) and option isolation between Site ID 1 and Site ID 2.
+  - Read-only `SourceDiscoveryService` and `PreflightService`: capability enforcement before inventory collection, mode/topology validation, paginated network site enumeration beyond 100 sites, custom/unknown table classification, blog context preservation (`switch_to_blog` / `restore_current_blog`), `CUSTOM_USER_TABLE` and multi-network blocker detection, and absence of credentials, salts, or user email/password hashes in serialized reports.
 - **Topology Coverage Note**:
   - **Subdirectory Multisite**: Provisioned and verified as a live subdirectory multisite network (`http://localhost:9080/` and `http://localhost:9080/subsite/`) in `@wordpress/env` and in the `phpunit-multisite.xml.dist` integration suite.
   - **Subdomain Multisite**: Verified at the database/blog-record and table-prefix level (`site2.network-a.example.org` created via `WP_UnitTestCase::factory()->blog->create()`), which does **not** exercise a live `SUBDOMAIN_INSTALL = true` HTTP/rewrite network. Because `@wordpress/env` binds to single-label `localhost` and WordPress core requires a dotted domain plus wildcard/host DNS resolution for live HTTP `SUBDOMAIN_INSTALL` routing, full HTTP subdomain container routing requires the manual host/WP-CLI setup documented in [Section 6.2 of `docs/development-environment.md`](development-environment.md#62-wp-env-localhost-subdomain-limitation--actionable-subdomain-setup).
@@ -92,7 +93,7 @@ To thoroughly validate all four migration directions, the test harness requires 
 - **Input**: Site ID 1 from Network A.
 - **Verification Gates**:
   - `wp_posts`, `wp_options`, `wp_terms` transferred.
-  - `wp_blogs`, `wp_site`, `wp_sitemeta`, `wp_signups`, `wp_registration_log`, `wp_blog_versions` strictly omitted.
+  - `wp_blogs`, `wp_blogmeta`, `wp_site`, `wp_sitemeta`, `wp_signups`, `wp_registration_log` (and legacy `wp_blog_versions` / `wp_sitecategories` if present) strictly omitted.
   - Network-only options stripped from `wp_options`.
   - Target functions as a pure single-site WordPress install.
 

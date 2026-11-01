@@ -1,9 +1,9 @@
 # WordPress Core Data Inventory & Schema Boundaries
 
 > [!NOTE]
-> **Task Reference:** `SITECONVOY-M0-002`  
-> **Status:** PROPOSED RESEARCH SPECIFICATION  
-> Sourced from official WordPress core APIs (`wpdb::tables()`, `wpdb::get_blog_prefix()`, `wp_get_db_schema()`) and primary core codebase research. Empirical testing and database verification remain scheduled for Milestone M1+. This inventory establishes the foundational boundaries between global network data, site-specific subsite data, shared identities, and third-party plugin tables.
+> **Task Reference:** `SITECONVOY-M0-002` / `SITECONVOY-M1-002`
+> **Status:** VERIFIED AGAINST WORDPRESS 6.7 CORE CATALOG (`M1-002`)
+> Sourced from official WordPress core APIs (`wpdb::tables()`, `wpdb::get_blog_prefix()`, `wp_get_db_schema()`) and verified empirically against WordPress 6.7 in the `@wordpress/env` integration test harness during `SITECONVOY-M1-002`. This inventory establishes the foundational boundaries between global network data, site-specific subsite data, legacy/deprecated tables, shared identities, and third-party plugin tables.
 
 ---
 
@@ -13,32 +13,36 @@ WordPress does not use a single rigid prefix across all installations or all sit
 
 ### 1.1 Core API Scope Definitions (`wpdb::tables()`)
 
-As defined in [`wpdb::tables( string $scope = 'all', bool $prefix = true, int $blog_id = 0 )`](https://developer.wordpress.org/reference/classes/wpdb/tables/), WordPress segments database tables into distinct functional scopes. It is vital to distinguish internal catalog definitions from what the API returns:
+As defined in [`wpdb::tables( string $scope = 'all', bool $prefix = true, int $blog_id = 0 )`](https://developer.wordpress.org/reference/classes/wpdb/tables/) (`wp-includes/class-wpdb.php`), WordPress segments database tables into distinct functional scopes. It is vital to distinguish internal catalog definitions from physical table existence and legacy pre-3.0 WordPress MU tables:
 
 1. **`$scope = 'global'`**:
    - In single-site installations: returns standard global tables (`users`, `usermeta`).
    - In multisite installations (`is_multisite() === true`): WordPress core automatically merges `$this->global_tables` and `$this->ms_global_tables`. Therefore, calling `$wpdb->tables('global')` on multisite returns *both* shared user tables and multisite network governance tables.
 2. **`$scope = 'ms_global'`**:
-   - Specifically returns the multisite network governance tables, regardless of whether multisite is currently active:
+   - Specifically returns the six multisite network governance tables registered in `wpdb::$ms_global_tables`, regardless of whether multisite is currently active:
      - `blogs` (`{$wpdb->base_prefix}blogs`) &mdash; Tracks all subsites, blog IDs, domains, and paths.
+     - `blogmeta` (`{$wpdb->base_prefix}blogmeta`) &mdash; Per-site network metadata table (introduced in WordPress 5.1; `is_site_meta_supported()`).
+     - `signups` (`{$wpdb->base_prefix}signups`) &mdash; Pending user registrations and site activations.
      - `site` (`{$wpdb->base_prefix}site`) &mdash; Defines the network entity (domain/path).
      - `sitemeta` (`{$wpdb->base_prefix}sitemeta`) &mdash; Network-wide options, active sitewide plugins, network admin list.
-     - `signups` (`{$wpdb->base_prefix}signups`) &mdash; Pending user registrations and site activations.
      - `registration_log` (`{$wpdb->base_prefix}registration_log`) &mdash; Historical subsite creation log.
-     - `blog_versions` (`{$wpdb->base_prefix}blog_versions`) &mdash; Database schema upgrade tracking per subsite.
+   - **Legacy `blog_versions` Distinction**: `{$wpdb->base_prefix}blog_versions` is **not** in `wpdb::$ms_global_tables` in WordPress 6.7 (`wp-includes/class-wpdb.php`). It is a legacy pre-3.0 WordPress MU table referenced only in historical upgrade routines (`wp-admin/includes/upgrade.php`). SiteConvoy's discovery service inspects `SHOW TABLES` separately to classify `{$wpdb->base_prefix}blog_versions` under `legacy_multisite` if physically present.
 3. **`$scope = 'blog'`**:
-   - Returns site-specific tables for the requested site (instantiated for every individual blog):
+   - Returns the ten site-specific tables for the requested site (instantiated for every individual blog):
      - `posts`
-     - `postmeta`
-     - `options`
      - `comments`
-     - `commentmeta`
+     - `links` (legacy core blog table, still created in standard schema)
+     - `options`
+     - `postmeta`
      - `terms`
-     - `termmeta`
      - `term_taxonomy`
      - `term_relationships`
-     - `links` (legacy core table, often inactive)
-4. **`$scope = 'all'`**:
+     - `termmeta`
+     - `commentmeta`
+4. **`$scope = 'old'`**:
+   - Returns deprecated core tables (`categories`, `post2cat`, `link2cat`).
+   - On multisite (`is_multisite() === true`), `wpdb::tables('old')` merges `$this->old_ms_global_tables`, adding `sitecategories` (`{$wpdb->base_prefix}sitecategories`, deprecated global terms table moved to `old_ms_global_tables` in WordPress 6.1). These tables appear in the `wpdb::tables('old')` catalog even when not physically created in a fresh WordPress 6.7 database; `SourceDiscoveryService` explicitly checks physical existence via `SHOW TABLES`.
+5. **`$scope = 'all'`**:
    - Returns all blog-level and global tables (including `ms_global` if multisite).
 
 ---
@@ -91,9 +95,9 @@ Key core behaviors:
 A critical architectural challenge in multisite migration is the dual role of Site ID 1:
 
 1. **Shared Root Prefix**: The main site (Site ID 1) does *not* have a numerical prefix (it is not `wp_1_posts`, but `wp_posts`).
-2. **Co-location with Global Tables**: Site 1's tables (`wp_posts`, `wp_options`, `wp_terms`) reside in the exact same table namespace as network global tables (`wp_users`, `wp_blogs`, `wp_site`, `wp_sitemeta`, `wp_signups`, `wp_registration_log`, `wp_blog_versions`).
+2. **Co-location with Global Tables**: Site 1's tables (`wp_posts`, `wp_options`, `wp_terms`) reside in the exact same table namespace as network global tables (`wp_users`, `wp_blogs`, `wp_blogmeta`, `wp_site`, `wp_sitemeta`, `wp_signups`, `wp_registration_log`, and legacy `wp_blog_versions` / `wp_sitecategories` if present).
 3. **Options Bleed**: Site 1's `wp_options` table contains standard subsite options (`siteurl`, `home`, `blogname`), but frequently holds historical settings or plugin data intended for the entire network before multisite was enabled.
-4. **Extraction Requirement**: When extracting Site ID 1 into a standalone WordPress site, SiteConvoy **must** explicitly isolate the site-specific tables (`wpdb::tables('blog')`) from the `ms_global` tables (`wp_blogs`, `wp_site`, `wp_sitemeta`, `wp_signups`, `wp_registration_log`, `wp_blog_versions`) and scrub network-only keys from `wp_options` (e.g., `active_sitewide_plugins`).
+4. **Extraction Requirement**: When extracting Site ID 1 into a standalone WordPress site, SiteConvoy **must** explicitly isolate the site-specific tables (`wpdb::tables('blog')`) from the `ms_global` tables (`wp_blogs`, `wp_blogmeta`, `wp_site`, `wp_sitemeta`, `wp_signups`, `wp_registration_log`) as well as any legacy multisite tables (`wp_blog_versions`, `wp_sitecategories`), and scrub network-only keys from `wp_options` (e.g., `active_sitewide_plugins`).
 
 ---
 

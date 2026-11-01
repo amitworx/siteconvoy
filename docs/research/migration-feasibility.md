@@ -32,7 +32,7 @@
    - Identify associated users (site capabilities + authors).
 2. **Database Transformation**:
    - Rename tables from `{$source_prefix}{table}` to `{$target_base_prefix}{table}` (e.g. `wp_2_posts` &rarr; `wp_posts`).
-   - For **Site ID 1**: Retain `wp_posts`, `wp_options`, etc., but explicitly exclude all `ms_global` tables (`wp_blogs`, `wp_site`, `wp_sitemeta`, `wp_signups`, `wp_registration_log`, `wp_blog_versions`). Filter `wp_options` to purge `active_sitewide_plugins`.
+   - For **Site ID 1**: Retain `wp_posts`, `wp_options`, etc., but explicitly exclude all `ms_global` tables (`wp_blogs`, `wp_blogmeta`, `wp_site`, `wp_sitemeta`, `wp_signups`, `wp_registration_log`) and any legacy multisite tables (`wp_blog_versions`, `wp_sitecategories`). Filter `wp_options` to purge `active_sitewide_plugins`.
    - Extract and rename usermeta capabilities: `{$source_prefix}capabilities` &rarr; `{$target_base_prefix}capabilities`.
 3. **Media Transformation**:
    - Move/copy files from `wp-content/uploads/sites/{blog_id}/` to standalone `wp-content/uploads/`.
@@ -77,11 +77,14 @@ Full network migration is not merely a database dump; it requires comprehensive 
    - **Shared User Tables (`global`)**: `{$base_prefix}users`, `{$base_prefix}usermeta`.
    - **Multisite Global Governance Tables (`ms_global`)**:
      - `{$base_prefix}blogs` &mdash; Subsite registration records.
+     - `{$base_prefix}blogmeta` &mdash; Per-site network metadata records (WordPress 5.1+).
      - `{$base_prefix}site` &mdash; Network domain/path definition.
      - `{$base_prefix}sitemeta` &mdash; Network-wide options, active sitewide plugins, admin list.
      - `{$base_prefix}signups` &mdash; Pending user registrations and site activation keys.
      - `{$base_prefix}registration_log` &mdash; Historical subsite creation ledger.
-     - `{$base_prefix}blog_versions` &mdash; Schema upgrade tracking per blog.
+   - **Legacy / Deprecated Multisite Tables (if physically present)**:
+     - `{$base_prefix}blog_versions` &mdash; Legacy pre-3.0 WordPress MU schema upgrade tracking table (not in `wpdb::$ms_global_tables`).
+     - `{$base_prefix}sitecategories` &mdash; Deprecated global terms table in `wpdb::$old_ms_global_tables` (`wpdb::tables('old')`).
    - **Site-Specific Tables (`blog`)**: All tables for Site 1 (`{$base_prefix}{table}`) and all secondary subsites (`{$base_prefix}{id}_{table}`).
    - **Custom / Third-Party Tables**: Plugin tables matching network or subsite naming conventions.
 2. **Themes & Child Themes**:

@@ -158,8 +158,8 @@ archive-siteconvoy-20261101-123456.tar.gz
 - Tables are transformed with strict boundaries to avoid accidental replacement in column data.
 
 ### 4.2 Main Site (Site ID 1) Asymmetry
-- Site ID 1 subsite tables share names with global network tables (`wp_posts`, `wp_options` alongside `wp_users`, `wp_blogs`, `wp_site`, `wp_sitemeta`, `wp_signups`, `wp_registration_log`, `wp_blog_versions`).
-- Naive export captures network state. SiteConvoy enforces explicit inclusion lists separating subsite tables from `ms_global` tables and purges network-only keys (`active_sitewide_plugins`) from options.
+- Site ID 1 subsite tables share names with global network tables (`wp_posts`, `wp_options` alongside `wp_users`, `wp_blogs`, `wp_blogmeta`, `wp_site`, `wp_sitemeta`, `wp_signups`, `wp_registration_log`, and legacy `wp_blog_versions` / `wp_sitecategories` if present).
+- Naive export captures network state. SiteConvoy enforces explicit inclusion lists separating subsite tables (`wpdb::tables('blog')`) from `ms_global` and legacy multisite tables, and purges network-only keys (`active_sitewide_plugins`) from options.
 
 ### 4.3 Asset Discovery, Provisioning, and Dependency Management
 In full-network migrations (and subsite moves where custom code is required), SiteConvoy implements rigorous asset discovery:
