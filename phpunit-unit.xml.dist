@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/9.6/phpunit.xsd"
+    bootstrap="tests/bootstrap-unit.php"
+    backupGlobals="false"
+    colors="true"
+    beStrictAboutTestsThatDoNotTestAnything="true"
+    beStrictAboutOutputDuringTests="true"
+    convertErrorsToExceptions="true"
+    convertWarningsToExceptions="true"
+    convertNoticesToExceptions="true"
+>
+    <php>
+        <const name="ABSPATH" value="./" />
+        <const name="SITECONVOY_LOAD_FIXTURE_VALIDATOR_ONLY" value="true" />
+    </php>
+    <testsuites>
+        <testsuite name="SiteConvoy Unit Test Suite">
+            <file>./tests/PluginUnitTest.php</file>
+        </testsuite>
+    </testsuites>
+</phpunit>

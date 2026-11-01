@@ -1,9 +1,9 @@
 # SiteConvoy Testing Strategy & Fixture Specification
 
 > [!NOTE]
-> **Task Reference:** `SITECONVOY-M0-002`  
-> **Status:** PROPOSED TESTING STRATEGY  
-> This specification outlines the automated testing pyramid, environment requirements, synthetic fixtures, fault injection scenarios, and test-driven development (TDD) gates planned for milestone M1 and beyond. **No executable test code is implemented in milestone M0.**
+> **Task Reference:** `SITECONVOY-M0-002` / `SITECONVOY-M1-001`
+> **Status:** ACTIVE BASELINE HARNESS (`M1-001`) + PLANNED MIGRATION SCENARIOS (`M2+`)
+> Milestone `SITECONVOY-M1-001` establishes the reproducible `@wordpress/env` local Docker harness, PHPCS/WPCS ruleset, GitHub Actions CI matrix, and initial PHPUnit WordPress integration smoke tests (`tests/PluginUnitTest.php` and `tests/PluginBootstrapTest.php`). See [Local Development & Test Environment Guide](development-environment.md) for executable commands and current topology coverage. End-to-end migration scenarios (Section 3) and fault injection tests (Section 4) remain planned for Milestone M2 and beyond.
 
 ---
 
@@ -27,6 +27,19 @@ Starting in milestone M1, all executable code follows the Red/Green/Refactor cyc
 2. **Green**: Write the minimal code required to pass the test.
 3. **Refactor**: Clean code and optimize performance while maintaining green tests.
 4. **Regression**: Run the full suite across all supported PHP and WordPress versions.
+
+### 1.2 Implemented Baseline Test Suite (`SITECONVOY-M1-001`)
+- **Pure Unit Smoke Tests (`tests/PluginUnitTest.php`)**: Runs via `composer run test:unit` (`phpunit -c phpunit-unit.xml.dist`) without a database to verify `siteconvoy.php` existence, plugin headers (`Requires at least: 6.7`, `Requires PHP: 8.1`), the fail-closed `ABSPATH` direct-access guard, bootstrap symbol definitions, and the fail-closed safety guards in `bin/setup-fixtures.php`.
+- **WordPress Runtime Integration Tests (`tests/PluginBootstrapTest.php`)**: Runs against a real WordPress + MariaDB installation in both **Standalone** (`phpunit.xml.dist`, `npm run test:wp:single`) and **Multisite** (`phpunit-multisite.xml.dist`, `npm run test:wp:multisite`) modes. `tests/bootstrap.php` fails closed with a `RuntimeException` if the WordPress test suite (`WP_TESTS_DIR` / `/wordpress-phpunit`) is absent. Verifies:
+  - WordPress plugin header parsing (`get_plugin_data()`).
+  - Inert bootstrap execution (zero scheduled crons, options, or admin menus).
+  - Single-site vs. multisite runtime context (`is_multisite()`).
+  - Dynamic `$wpdb->base_prefix` and `$wpdb->get_blog_prefix( $site_id )` resolution without assuming hardcoded `wp_`.
+  - Separation of `ms_global` tables (`wp_blogs`, `wp_site`, `wp_sitemeta`) from Site ID 1 `blog` tables.
+  - Deterministic subsite creation (Site ID >= 2) and option isolation between Site ID 1 and Site ID 2.
+- **Topology Coverage Note**:
+  - **Subdirectory Multisite**: Provisioned and verified as a live subdirectory multisite network (`http://localhost:9080/` and `http://localhost:9080/subsite/`) in `@wordpress/env` and in the `phpunit-multisite.xml.dist` integration suite.
+  - **Subdomain Multisite**: Verified at the database/blog-record and table-prefix level (`site2.network-a.example.org` created via `WP_UnitTestCase::factory()->blog->create()`), which does **not** exercise a live `SUBDOMAIN_INSTALL = true` HTTP/rewrite network. Because `@wordpress/env` binds to single-label `localhost` and WordPress core requires a dotted domain plus wildcard/host DNS resolution for live HTTP `SUBDOMAIN_INSTALL` routing, full HTTP subdomain container routing requires the manual host/WP-CLI setup documented in [Section 6.2 of `docs/development-environment.md`](development-environment.md#62-wp-env-localhost-subdomain-limitation--actionable-subdomain-setup).
 
 ---
 

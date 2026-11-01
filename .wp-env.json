@@ -1,0 +1,24 @@
+{
+  "core": "WordPress/WordPress#6.7",
+  "phpVersion": "8.2",
+  "plugins": [
+    "."
+  ],
+  "multisite": true,
+  "port": 9080,
+  "testsPort": 9081,
+  "config": {
+    "WP_DEBUG": true,
+    "WP_DEBUG_LOG": true,
+    "WP_DEBUG_DISPLAY": false,
+    "SCRIPT_DEBUG": true
+  },
+  "env": {
+    "tests": {
+      "multisite": false,
+      "config": {
+        "WP_DEBUG": true
+      }
+    }
+  }
+}
