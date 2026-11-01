@@ -1,0 +1,28 @@
+# Operating System Files
+.DS_Store
+Thumbs.db
+
+# Editor and IDE Files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Dependency and Temporary Development Artifacts
+vendor/
+node_modules/
+*.log
+
+# Build Outputs (Packaging Note: WordPress plugin release ZIPs/assets must not be obscured)
+# Specific build cache directories may be ignored, but ensure plugin release distributions are retained if tracked
+build-cache/
+tmp/
+
+# Migration and Archive Files
+*.tar.gz
+*.zip
+*.sql
+*.sql.gz
+backups/
+siteconvoy-exports/
