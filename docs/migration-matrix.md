@@ -30,7 +30,8 @@
 ### 2.2 User & Identity Management
 - **User Selection (Subsite to Standalone)**:
   - Only users with explicit roles or authored content on the migrated subsite must be transferred. Unrelated network users are excluded.
-  - Super Administrator accounts must only be transferred if they hold an explicit role on the specific subsite or authored content.
+  - Role preservation: Imported users retain their original roles (e.g. an Author remains an Author). Automatic elevation to Administrator is prohibited.
+  - A destination bootstrap administrator is provisioned via explicit operator setup.
 - **Cautious Identity Resolution & Collision Handling (Into Multisite)**:
   - Account identity cannot be inferred safely from matching email or username alone.
   - **Prohibit silent account linking**: Never automatically merge or link source accounts to target network accounts based solely on email or login match.
@@ -50,7 +51,6 @@
 - **Preservation of `wp_posts.guid`**:
   - In accordance with WordPress migration standards (see [WordPress Advanced Administration: Migrating](https://developer.wordpress.org/advanced-administration/upgrade/migrating/) and [WP-CLI `search-replace --skip-columns=guid`](https://developer.wordpress.org/cli/commands/search-replace/)), existing `wp_posts.guid` values are globally unique identifiers (primarily used for RSS readers/feed identification) and **must not be modified** during routine domain or host migrations.
   - Deep URL replacement must be performed on post content (HTML image `src`, `srcset` attributes, and hyperlinks), postmeta (e.g., `_wp_attached_file` relative paths), widget settings, and options tables.
-  - Exceptional cases (such as newly generated content or explicit administrative overrides) must be handled separately with explicit warning and isolated reasoning.
 - **Media Path Translation**:
   - Standalone: `wp-content/uploads/`
   - Multisite: `wp-content/uploads/sites/{blog_id}/`
@@ -59,7 +59,7 @@
 
 ### 2.5 Integrity & Verification Requirements
 - Preflight validation must simulate the operation and confirm available disk space and permissions before making irreversible changes.
-- Cryptographic SHA-256 checksums must verify archive package integrity prior to restoration.
+- Cryptographic SHA-256 checksums verify internal package integrity; authentic source trust is verified out-of-band or via explicit operator approval.
 - Pre-migration backup checkpoints must be established.
 - Failures must trigger staged compensation and rollback procedures where safe, and record clear diagnostic logs for manual recovery if rollback is obstructed.
 
@@ -69,10 +69,10 @@
 
 | Scenario / Topology | Classification | Impact & Planned Handling |
 |---|---|---|
-| **Site ID 1 Subsite Extraction** | **Conditional / Fully Supported** | Requires dedicated extraction adapter to isolate `wp_*` subsite tables from `ms_global` network tables and scrub network option keys. |
+| **Site ID 1 Subsite Extraction** | **Supported with Isolation Adapter** | Dedicated adapter isolates `wp_*` subsite tables from `ms_global` network tables (`wp_blogs`, `wp_site`, `wp_sitemeta`, `wp_signups`, `wp_registration_log`, `wp_blog_versions`) and scrubs network option keys. |
 | **Subdirectory with Port/Path Mapping** | **Supported** | Path search-and-replace engine accounts for custom subfolder installations (e.g. `example.com/wp/site1/`). |
 | **Legacy `blogs.dir` Media Paths** | **Conditional** | Preflight flags legacy directory structure and executes rewrite normalization to `uploads/sites/{id}/`. |
+| **External Cloud Object Storage (S3/GCS)** | **Conditional / Blocked if Incomplete** | When media is offloaded to S3/GCS and local files are absent: requires verified export adapter and cloud credentials. If cloud sync is unconfigured, migration is **BLOCKED / FLAGGED INCOMPLETE** with clear diagnostics. Silent partial success is prohibited; object storage secrets are excluded from packages. |
 | **Custom User Tables (`CUSTOM_USER_TABLE`)** | **Unsupported in v1.0** | Environments using non-standard shared user tables are detected and halted during preflight with explicit warning. |
 | **Multi-Network Configurations (`site_id > 1`)** | **Unsupported in v1.0** | Multiple networks within a single database are flagged during preflight; migration of non-primary network is blocked. |
-| **External Cloud Object Storage (S3/GCS)** | **Conditional** | When uploads are offloaded via third-party storage plugins, media file extraction is bypassed and only database references are processed. |
 | **Non-Standard Database Engines (e.g. MyISAM)** | **Conditional** | Non-transactional tables trigger strict pre-migration table backup checkpoints prior to staging. |

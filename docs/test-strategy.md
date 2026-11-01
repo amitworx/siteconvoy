@@ -69,13 +69,13 @@ To thoroughly validate all four migration directions, the test harness requires 
   - Media path rewritten from `uploads/sites/2/` to `uploads/`.
   - Content URLs updated to `standalone.local`.
   - `wp_posts.guid` entries match source verbatim.
-  - User 2 transferred as administrator of standalone site; User 1 and User 3 excluded.
+  - **Role Preservation & Bootstrap Admin**: User 2 is transferred preserving their original role (**Author**); User 2 is **NOT** automatically elevated to Administrator. A destination-side bootstrap action (or explicit operator configuration) establishes the target administrator. User 1 and User 3 are excluded.
 
 ### Scenario 2: Main Site (Site ID 1) to Standalone (Direction 1 Special Case)
 - **Input**: Site ID 1 from Network A.
 - **Verification Gates**:
   - `wp_posts`, `wp_options`, `wp_terms` transferred.
-  - `wp_blogs`, `wp_site`, `wp_sitemeta` strictly omitted.
+  - `wp_blogs`, `wp_site`, `wp_sitemeta`, `wp_signups`, `wp_registration_log`, `wp_blog_versions` strictly omitted.
   - Network-only options stripped from `wp_options`.
   - Target functions as a pure single-site WordPress install.
 
@@ -90,7 +90,7 @@ To thoroughly validate all four migration directions, the test harness requires 
 ### Scenario 4: Full Network Migration (Direction 3)
 - **Input**: Complete Network A migrated to new domain `network-c.local`.
 - **Verification Gates**:
-  - All site IDs and tables preserved.
+  - All site IDs and tables preserved (including all global, `ms_global`, and site tables).
   - Global `wp_site`, `wp_blogs`, and `wp_sitemeta` updated.
   - URLs updated across all subsites.
   - All post GUIDs preserved.
@@ -101,17 +101,32 @@ To thoroughly validate all four migration directions, the test harness requires 
 - **Verification Gates**:
   - Tables converted to `wp_{new_id}_*`.
   - Media relocated to `uploads/sites/{new_id}/`.
-  - Standalone admin mapped to subsite admin on Network B.
+  - **Explicit Approval**: Standalone admin mapped to a subsite-level role on Network B **only** upon explicit approval by Network B Super Administrator. Standalone admin is strictly barred from receiving network super-admin rights.
+
+### Scenario 6: Offloaded Cloud Media Missing Verification
+- **Input**: Standalone or subsite with media offloaded to external S3/GCS where local files are absent.
+- **Verification Gates**:
+  - Preflight detects external object storage provider.
+  - If offloaded object sync is unconfigured, migration is **BLOCKED / FLAGGED INCOMPLETE** with clear diagnostic warning.
+  - Zero silent data loss or empty media references on target.
+
+### Scenario 7: Live Source Mutations During Batch Export
+- **Input**: Source site subjected to continuous synthetic writes (publishing new posts/comments) during chunked database export.
+- **Verification Gates**:
+  - Exporter checks consistency manifests.
+  - Manifest logs warnings for out-of-sync foreign key references.
+  - Preflight recommends or enforces maintenance window mode.
 
 ---
 
 ## 4. Fault Injection & Rollback Testing
 
-To ensure the reliability design goals are verified, synthetic faults will be injected into the test pipeline:
+To ensure the reliability design goals are verified without making false assumptions regarding atomic OOM or DDL:
 
-| Fault Injected | Stage | Expected Result |
+| Fault Injected | Stage | Realistic Behavior & Recovery Protocol |
 |---|---|---|
-| **Simulated Disk Full** | Mid-archive extraction | Import halted; temporary files purged; destination database unmutated. |
-| **SQL Syntax / Table Collision** | Mid-database import | Transaction rolled back (InnoDB) or compensation drops staged tables; error logged in journal. |
-| **PHP Memory Limit Exhaustion** | Batch serialized replace | Resumable checkpoint saved; process resumes upon restart without corruption. |
+| **Simulated Disk Full** | Mid-archive extraction | Extraction aborted; staging directory purged; destination database unmutated. |
+| **SQL Syntax / Table Collision** | Mid-database import | Transaction rolled back for DML (InnoDB); for DDL statements (where MySQL executes implicit commits), compensating recovery drops newly staged tables using journal ledger. |
+| **PHP Fatal Out-of-Memory (OOM)** | Batch serialized replace | Process killed immediately (cannot run cleanup handlers). **Recovery**: Checkpoints are persisted *prior* to batch execution. Upon process restart, the runner inspects durable disk journal and resumes from last safe checkpoint. |
 | **Corrupted SHA-256 Checksum** | Package verification | Extraction aborted before any files or database tables are modified. |
+| **Untrusted / Replaced Archive** | Trust review | Valid internal checksum but unconfirmed out-of-band digest requires explicit admin trust approval before staging. |

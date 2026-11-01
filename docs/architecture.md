@@ -16,10 +16,10 @@ SiteConvoy is structured around a pipeline of modular, decoupled subsystems:
 |                                 SiteConvoy Engine                                 |
 +-----------------------------------------------------------------------------------+
 |  1. Preflight & Discovery  --> Scan environment, disk space, limits, collisions   |
-|  2. Backup & Checkpointing --> Establish restore points, journal stage state      |
+|  2. Backup & Checkpointing --> Establish restore points, durable disk journal     |
 |  3. Archive Packaging      --> Chunked extraction, streaming compression, SHA256  |
 |  4. Transform Engine       --> Table prefix rewrite, user review, serialization   |
-|  5. Filesystem Manager     --> Media translocation, staged copy & atomic rename   |
+|  5. Filesystem Manager     --> Media translocation, containment & atomic rename   |
 |  6. Recovery & Rollback    --> Best-effort compensation, journaled manual recovery|
 +-----------------------------------------------------------------------------------+
 ```
@@ -56,10 +56,13 @@ SiteConvoy executes migrations according to a deterministic state machine, ensur
 [VERIFYING_CHECKSUM] - (Checksum Mismatch) ----> [REJECTED] (Halt; discard archive)
     |
     v
+[TRUST_APPROVAL]    ---- (Unapproved Trust) ---> [PENDING_OPERATOR_APPROVAL]
+    |
+    v
 [STAGING_FILES]     ---- (Extract/Disk Error) -> [CLEANUP_STAGING] (Purge tmp/)
     |
     v
-[TRANSFORMING_DB]   ---- (SQL Failure) --------> [COMPENSATING_ROLLBACK] (Restore DB)
+[TRANSFORMING_DB]   ---- (SQL Failure) --------> [COMPENSATING_ROLLBACK] (Drop staged tables)
     |
     v
 [COMMITTING_FILES]  ---- (FS Swap Error) ------> [MANUAL_RECOVERY_REQUIRED]
@@ -72,7 +75,7 @@ SiteConvoy executes migrations according to a deterministic state machine, ensur
 ```
 
 ### Destination Mutation Boundary
-- **Zero-Mutation Stages**: `INITIATED`, `PREFLIGHT_RUNNING`, `PREFLIGHT_PASSED`, `BACKUP_CREATING`, `PACKAGING`, `VERIFYING_CHECKSUM`, `STAGING_FILES`. At these stages, target live tables and media directories are completely untouched.
+- **Zero-Mutation Stages**: `INITIATED`, `PREFLIGHT_RUNNING`, `PREFLIGHT_PASSED`, `BACKUP_CREATING`, `PACKAGING`, `VERIFYING_CHECKSUM`, `TRUST_APPROVAL`, `STAGING_FILES`. At these stages, target live tables and media directories are completely untouched.
 - **Controlled-Mutation Stages**: `TRANSFORMING_DB` (operates on staged tables or restore points), `COMMITTING_FILES` (swaps files from `tmp/`).
 
 ---
@@ -130,11 +133,11 @@ archive-siteconvoy-20261101-123456.tar.gz
 
 ### 4.1 Database Table Isolation & Dynamic Prefix Discovery
 - Naive tools assume hardcoded `wp_` or `wp_{id}_` prefixes.
-- SiteConvoy queries [`wpdb::tables()`](https://developer.wordpress.org/reference/classes/wpdb/tables/) and [`wpdb::get_blog_prefix( $blog_id )`](https://developer.wordpress.org/reference/classes/wpdb/get_blog_prefix/) to derive exact table names.
+- SiteConvoy queries [`wpdb::tables()`](https://developer.wordpress.org/reference/classes/wpdb/tables/) and [`wpdb::get_blog_prefix( $blog_id )`](https://developer.wordpress.org/reference/classes/wpdb/get_blog_prefix/) to derive exact table names. Note that calling `$wpdb->tables('global')` on multisite returns both shared users and `ms_global` governance tables, while `$scope = 'ms_global'` provides an isolated catalog.
 - Tables are transformed with strict boundaries to avoid accidental replacement in column data.
 
 ### 4.2 Main Site (Site ID 1) Asymmetry
-- Site ID 1 subsite tables share names with global network tables (`wp_posts`, `wp_options` alongside `wp_users`, `wp_blogs`, `wp_site`, `wp_sitemeta`).
+- Site ID 1 subsite tables share names with global network tables (`wp_posts`, `wp_options` alongside `wp_users`, `wp_blogs`, `wp_site`, `wp_sitemeta`, `wp_signups`, `wp_registration_log`, `wp_blog_versions`).
 - Naive export captures network state. SiteConvoy enforces explicit inclusion lists separating subsite tables from `ms_global` tables and purges network-only keys (`active_sitewide_plugins`) from options.
 
 ### 4.3 Identity Resolution & User Protection
@@ -145,11 +148,12 @@ archive-siteconvoy-20261101-123456.tar.gz
 - Serialized PHP objects and JSON strings are recursively unserialized, transformed, and reserialized with character-length verification.
 - In accordance with WordPress core migration standards and WP-CLI (`--skip-columns=guid`), `wp_posts.guid` entries are immutable identifiers and **must not be rewritten**.
 
-### 4.5 Media Filesystem Management
+### 4.5 Media Filesystem Management & Containment
 - Media paths are mapped cleanly between `wp-content/uploads/sites/{id}/` (multisite) and `wp-content/uploads/` (standalone), synchronizing attachment metadata without altering existing GUIDs.
+- Filesystem extraction validates entry normalization and enforces directory containment inside `tmp/`, rejecting symlinks and hardlinks pointing outside the sandbox.
 
 ### 4.6 Extension Adapters & Third-Party Table Hooks
-- Extensible adapter architecture allowing third-party plugins (e.g. WooCommerce, SEO plugins) to hook into preflight discovery, table classification, and URL replacement pipelines without polluting core engine code.
+- Extensible adapter architecture across all four modes allowing third-party plugins (e.g. WooCommerce, SEO plugins) to hook into preflight discovery, table classification, and URL replacement pipelines.
 
 ### 4.7 Tested Reliability & Recovery Goals
 - Universal atomic rollback is impossible across non-transactional MySQL operations (DDL) and disparate filesystems.
@@ -157,5 +161,5 @@ archive-siteconvoy-20261101-123456.tar.gz
   - Preflight dry-run validation.
   - Backup restore points.
   - Isolated staging directories (`tmp/`).
-  - Persistent state journaling for idempotency and resumption.
+  - Durable pre-batch checkpoints persisted to disk prior to hazardous executions (mitigating uncatchable PHP fatal OOM).
   - Clear manual recovery documentation and state logs.

@@ -13,22 +13,21 @@ WordPress does not use a single rigid prefix across all installations or all sit
 
 ### 1.1 Core API Scope Definitions (`wpdb::tables()`)
 
-As defined in [`wpdb::tables()`](https://developer.wordpress.org/reference/classes/wpdb/tables/), WordPress segments database tables into distinct functional scopes:
+As defined in [`wpdb::tables( string $scope = 'all', bool $prefix = true, int $blog_id = 0 )`](https://developer.wordpress.org/reference/classes/wpdb/tables/), WordPress segments database tables into distinct functional scopes. It is vital to distinguish internal catalog definitions from what the API returns:
 
-1. **`global` (Global Single/Multisite Tables)**:
-   - Shared across all sites in the database installation:
-     - `users` (Canonical name: `{$wpdb->base_prefix}users`)
-     - `usermeta` (Canonical name: `{$wpdb->base_prefix}usermeta`)
-2. **`ms_global` (Multisite Network Global Tables)**:
-   - Specific to the multisite network governance and site tracking:
+1. **`$scope = 'global'`**:
+   - In single-site installations: returns standard global tables (`users`, `usermeta`).
+   - In multisite installations (`is_multisite() === true`): WordPress core automatically merges `$this->global_tables` and `$this->ms_global_tables`. Therefore, calling `$wpdb->tables('global')` on multisite returns *both* shared user tables and multisite network governance tables.
+2. **`$scope = 'ms_global'`**:
+   - Specifically returns the multisite network governance tables, regardless of whether multisite is currently active:
      - `blogs` (`{$wpdb->base_prefix}blogs`) &mdash; Tracks all subsites, blog IDs, domains, and paths.
      - `site` (`{$wpdb->base_prefix}site`) &mdash; Defines the network entity (domain/path).
      - `sitemeta` (`{$wpdb->base_prefix}sitemeta`) &mdash; Network-wide options, active sitewide plugins, network admin list.
      - `signups` (`{$wpdb->base_prefix}signups`) &mdash; Pending user registrations and site activations.
      - `registration_log` (`{$wpdb->base_prefix}registration_log`) &mdash; Historical subsite creation log.
      - `blog_versions` (`{$wpdb->base_prefix}blog_versions`) &mdash; Database schema upgrade tracking per subsite.
-3. **`blog` (Site-Specific Subsite Tables)**:
-   - Instantiated for every individual site within the network:
+3. **`$scope = 'blog'`**:
+   - Returns site-specific tables for the requested site (instantiated for every individual blog):
      - `posts`
      - `postmeta`
      - `options`
@@ -39,6 +38,8 @@ As defined in [`wpdb::tables()`](https://developer.wordpress.org/reference/class
      - `term_taxonomy`
      - `term_relationships`
      - `links` (legacy core table, often inactive)
+4. **`$scope = 'all'`**:
+   - Returns all blog-level and global tables (including `ms_global` if multisite).
 
 ---
 
@@ -46,11 +47,35 @@ As defined in [`wpdb::tables()`](https://developer.wordpress.org/reference/class
 
 ### 2.1 Prefix Resolution Logic (`wpdb::get_blog_prefix()`)
 
-The canonical table prefix for any site is resolved via [`wpdb::get_blog_prefix( $blog_id )`](https://developer.wordpress.org/reference/classes/wpdb/get_blog_prefix/):
+The exact prefix resolution logic in WordPress core (`wp-includes/class-wpdb.php`) is defined as follows:
 
-$$\text{Prefix}(blog\_id) = \begin{cases} wpdb\rightarrow\text{base\_prefix} & \text{if } blog\_id \text{ is null or empty} \\ wpdb\rightarrow\text{base\_prefix} \cdot blog\_id \cdot \text{"\_"} & \text{if } blog\_id > 1 \text{ in standard multisite} \\ wpdb\rightarrow\text{base\_prefix} & \text{for Site ID 1 (standard main site)} \end{cases}$$
+```php
+public function get_blog_prefix( $blog_id = null ) {
+    if ( is_multisite() ) {
+        if ( null === $blog_id ) {
+            $blog_id = $this->blogid;
+        }
+        $blog_id = (int) $blog_id;
+
+        if ( defined( 'MULTISITE' ) && ( 0 === $blog_id || 1 === $blog_id ) ) {
+            return $this->base_prefix;
+        } else {
+            return $this->base_prefix . $blog_id . '_';
+        }
+    } else {
+        return $this->base_prefix;
+    }
+}
+```
+
+Key core behaviors:
+1. **Single-Site Mode**: When `is_multisite()` is false, `get_blog_prefix()` always returns `$this->base_prefix`.
+2. **Multisite Mode with `null` parameter**: When `$blog_id` is omitted or `null`, it falls back to the **current active blog ID** (`$this->blogid`), *not* necessarily the base prefix.
+3. **Main Site (`0 === $blog_id || 1 === $blog_id`)**: In regular multisite (when constant `MULTISITE` is defined), blog ID 0 or 1 explicitly returns `$this->base_prefix`.
+4. **Secondary Subsites (`blog_id > 1`)**: Returns `$this->base_prefix . $blog_id . '_'`.
 
 *Example with default prefix (`$wpdb->base_prefix = 'wp_'`)*:
+- Current site is Site 2, `$wpdb->get_blog_prefix()` &rarr; `wp_2_`
 - Site 1 Posts: `wp_posts`
 - Site 2 Posts: `wp_2_posts`
 - Site 42 Posts: `wp_42_posts`
@@ -63,12 +88,12 @@ $$\text{Prefix}(blog\_id) = \begin{cases} wpdb\rightarrow\text{base\_prefix} & \
 
 ### 2.2 The Main Site (Site ID 1) Asymmetry Problem
 
-A critical architectural pitfall in naive multisite migration tools is treating Site ID 1 as identical to secondary subsites or confusing it with standalone WordPress:
+A critical architectural challenge in multisite migration is the dual role of Site ID 1:
 
 1. **Shared Root Prefix**: The main site (Site ID 1) does *not* have a numerical prefix (it is not `wp_1_posts`, but `wp_posts`).
-2. **Co-location with Global Tables**: Site 1's tables (`wp_posts`, `wp_options`, `wp_terms`) reside in the exact same table namespace as network global tables (`wp_users`, `wp_blogs`, `wp_site`, `wp_sitemeta`).
+2. **Co-location with Global Tables**: Site 1's tables (`wp_posts`, `wp_options`, `wp_terms`) reside in the exact same table namespace as network global tables (`wp_users`, `wp_blogs`, `wp_site`, `wp_sitemeta`, `wp_signups`, `wp_registration_log`, `wp_blog_versions`).
 3. **Options Bleed**: Site 1's `wp_options` table contains standard subsite options (`siteurl`, `home`, `blogname`), but frequently holds historical settings or plugin data intended for the entire network before multisite was enabled.
-4. **Extraction Requirement**: When extracting Site ID 1 into a standalone WordPress site, SiteConvoy **must** explicitly filter out the `ms_global` tables (`wp_blogs`, `wp_site`, `wp_sitemeta`, `wp_signups`, `wp_registration_log`, `wp_blog_versions`) and scrub network-only keys from `wp_options` (e.g., `active_sitewide_plugins`).
+4. **Extraction Requirement**: When extracting Site ID 1 into a standalone WordPress site, SiteConvoy **must** explicitly isolate the site-specific tables (`wpdb::tables('blog')`) from the `ms_global` tables (`wp_blogs`, `wp_site`, `wp_sitemeta`, `wp_signups`, `wp_registration_log`, `wp_blog_versions`) and scrub network-only keys from `wp_options` (e.g., `active_sitewide_plugins`).
 
 ---
 
