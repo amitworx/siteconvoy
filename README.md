@@ -32,13 +32,14 @@ SiteConvoy is being designed to provide reliable, verifiable, and transparent mi
 
 ## Current Status & Documentation
 
-- **Status**: Pre-release / Nonfunctional Foundation (Milestone M1 — `SITECONVOY-M1-001`).
-- **Executable Code**: Minimal inert plugin bootstrap (`siteconvoy.php`) and automated test/CI harness only. **There is no migration engine or user interface yet.**
+- **Status**: Pre-release / Nonfunctional Foundation (Milestone M1 — `SITECONVOY-M1-002`).
+- **Executable Code**: Inert plugin bootstrap (`siteconvoy.php`), read-only source discovery and preflight contracts (`includes/`), and automated test/CI harness only. **There is no migration export/import engine or user interface yet.**
 - **Prerequisites & System Requirements**:
   - Declared and tested baseline (`siteconvoy.php` & `composer.json`): WordPress `>=6.7`, PHP `>=8.1`.
   - Automated CI & local test harness verified on: WordPress `6.7`, PHP `8.1`, `8.2`, `8.3` (GitHub Actions CI matrix) and local `@wordpress/env` (PHP `8.2`, MariaDB `11.8`).
 
-For details on the project roadmap, local development environment, architectural designs, research, and migration specifications, see:
+For details on the project roadmap, local development environment, discovery/preflight contracts, architectural designs, research, and migration specifications, see:
+- [Read-Only Source Discovery & Preflight Contracts](docs/discovery-preflight.md)
 - [Local Development & Test Environment Guide](docs/development-environment.md)
 - [Roadmap](docs/roadmap.md)
 - [Architecture & Subsystem Specification](docs/architecture.md)

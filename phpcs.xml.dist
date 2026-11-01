@@ -12,8 +12,9 @@
     <exclude-pattern>*/tmp/*</exclude-pattern>
     <exclude-pattern>*/tests/wordpress/*</exclude-pattern>
 
-    <!-- Exclude WordPress class/file naming conventions for PHPUnit tests directory -->
+    <!-- Exclude WordPress class/file naming conventions for PSR-4 includes and PHPUnit tests directories -->
     <rule ref="WordPress.Files.FileName">
+        <exclude-pattern>*/includes/*</exclude-pattern>
         <exclude-pattern>*/tests/*</exclude-pattern>
     </rule>
 

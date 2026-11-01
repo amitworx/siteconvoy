@@ -34,6 +34,13 @@ if ( ! defined( 'SITECONVOY_PATH' ) ) {
 	define( 'SITECONVOY_PATH', plugin_dir_path( __FILE__ ) );
 }
 
+// Load read-only contracts, source discovery, and preflight classes.
+require_once SITECONVOY_PATH . 'includes/Contracts/MigrationMode.php';
+require_once SITECONVOY_PATH . 'includes/Contracts/PreflightFinding.php';
+require_once SITECONVOY_PATH . 'includes/Contracts/PreflightReport.php';
+require_once SITECONVOY_PATH . 'includes/Discovery/SourceDiscoveryService.php';
+require_once SITECONVOY_PATH . 'includes/Preflight/PreflightService.php';
+
 /**
  * Inert plugin initialization hook.
  *

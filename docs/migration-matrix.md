@@ -78,7 +78,7 @@
 
 | Scenario / Topology | Classification | Impact & Planned Handling |
 |---|---|---|
-| **Site ID 1 Subsite Extraction** | **Supported with Isolation Adapter** | Dedicated adapter isolates `wp_*` subsite tables from `ms_global` network tables (`wp_blogs`, `wp_site`, `wp_sitemeta`, `wp_signups`, `wp_registration_log`, `wp_blog_versions`) and scrubs network option keys. |
+| **Site ID 1 Subsite Extraction** | **Supported with Isolation Adapter** | Dedicated adapter isolates `wp_*` subsite tables from `ms_global` network tables (`wp_blogs`, `wp_blogmeta`, `wp_site`, `wp_sitemeta`, `wp_signups`, `wp_registration_log`) and legacy multisite tables (`wp_blog_versions`, `wp_sitecategories`), and scrubs network option keys. |
 | **Subdirectory with Port/Path Mapping** | **Supported** | Path search-and-replace engine accounts for custom subfolder installations (e.g. `example.com/wp/site1/`). |
 | **Legacy `blogs.dir` Media Paths** | **Conditional** | Preflight flags legacy directory structure and executes rewrite normalization to `uploads/sites/{id}/`. |
 | **External Cloud Object Storage (S3/GCS)** | **Conditional / Blocked if Incomplete** | When media is offloaded to S3/GCS and local files are absent: requires verified export adapter and cloud credentials. If cloud sync is unconfigured, migration is **BLOCKED / FLAGGED INCOMPLETE** with clear diagnostics. Silent partial success is prohibited; object storage secrets are excluded from packages. |

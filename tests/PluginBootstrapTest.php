@@ -126,9 +126,12 @@ class PluginBootstrapTest extends WP_UnitTestCase {
 		$blog_1_tables    = $wpdb->tables( 'blog', true, 1 );
 
 		$this->assertArrayHasKey( 'blogs', $ms_global_tables );
+		$this->assertArrayHasKey( 'blogmeta', $ms_global_tables, 'WordPress ms_global catalog includes blogmeta.' );
 		$this->assertArrayHasKey( 'site', $ms_global_tables );
 		$this->assertArrayHasKey( 'sitemeta', $ms_global_tables );
+		$this->assertArrayNotHasKey( 'blog_versions', $ms_global_tables, 'blog_versions is a legacy MU table, not in ms_global_tables.' );
 		$this->assertArrayNotHasKey( 'blogs', $blog_1_tables );
+		$this->assertArrayNotHasKey( 'blogmeta', $blog_1_tables );
 		$this->assertArrayNotHasKey( 'sitemeta', $blog_1_tables );
 
 		// Provision a deterministic secondary subsite (Site ID >= 2) using WP test factory.
