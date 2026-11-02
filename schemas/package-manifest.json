@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SiteConvoyPackageManifest",
+  "type": "object",
+  "required": [
+    "format_version",
+    "mode",
+    "source",
+    "entries"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "format_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "subsite_to_standalone",
+        "subsite_to_multisite",
+        "full_network_to_new_env",
+        "standalone_to_subsite"
+      ]
+    },
+    "source": {
+      "type": "object",
+      "required": [
+        "is_multisite"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "is_multisite": {
+          "type": "boolean"
+        },
+        "network_id": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "site_id": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "site_count": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "base_prefix": {
+          "type": "string"
+        }
+      }
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "size",
+          "sha256"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "type": {
+            "type": "string",
+            "const": "regular"
+          }
+        }
+      }
+    }
+  }
+}
