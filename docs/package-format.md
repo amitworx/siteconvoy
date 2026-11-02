@@ -126,22 +126,25 @@ Entries in `PackageManifest` are sorted canonically by `path` using standard byt
    - Fixed epoch mtime (`1767225600`, representing `2026-01-01 00:00:00 UTC`) is assigned to every member via `setMtimeName()`.
    - Fixed compression method (`ZipArchive::CM_STORE`) is enforced via `setCompressionName()` to guarantee reproducible, bit-for-bit identical ZIP archives across platforms regardless of zlib compression variations.
 4. **Safe Staging & Workspace Directory**:
-   - Requires an explicit, private temporary staging directory (`0700`).
-   - Staging files use opaque random names (`stg_entry_<sha256>_<nonce>.tmp`) &mdash; never derived from manifest relative paths &mdash; eliminating symlink-following and traversal risks within the staging workspace.
-   - Symlinks for output destination and staging directories are strictly prohibited (`SYMLINK_PATH_PROHIBITED`).
+   - Requires an explicit, private temporary staging parent directory (`0700`).
+   - The writer never recursively deletes caller workspaces. It allocates an exclusive, randomly named per-operation subdirectory (`0700`, `sc_op_<nonce>`).
+   - Staging files use opaque random names (`stg_<nonce>.tmp`) &mdash; never derived from manifest relative paths &mdash; eliminating symlink-following and traversal risks within the staging workspace.
+   - Symlinks for output destination, staging parent, and any of their ancestor directory components are strictly prohibited (`SYMLINK_PATH_PROHIBITED`).
 5. **Independent Pre-Publication Verification**:
-   - The archive is built in a temporary file (`.zip.tmp.<nonce>`).
+   - The archive is built in a temporary file (`sc_pkg_<nonce>.tmp`) inside the exclusive operation subdirectory.
    - Once closed, the finalized archive is reopened independently:
      - Member count must match `manifest.json` + declared entries exactly.
-     - Members are enumerated: directory members (`/`) and symbolic links (Unix attribute `0120000`) are rejected (`ZIP_DIRECTORY_MEMBER_PROHIBITED`, `ZIP_SYMLINK_MEMBER_PROHIBITED`).
+     - Members are enumerated: directory members (`/`), symbolic links (Unix attribute `0120000`), and non-regular file members are rejected (`ZIP_DIRECTORY_MEMBER_PROHIBITED`, `ZIP_SYMLINK_MEMBER_PROHIBITED`, `ZIP_NONREGULAR_MEMBER_PROHIBITED`).
+     - Canonical member order (`manifest.json` and payload paths sorted in byte order) is enforced (`ZIP_MEMBER_ORDER_MISMATCH`).
+     - Embedded `manifest.json` has a bounded maximum size limit (`2 MB`, `MAX_MANIFEST_SIZE`) to prevent memory exhaustion attacks (`MANIFEST_EXCEEDS_SIZE_LIMIT`).
+     - Embedded `manifest.json` is strictly validated via `PackageManifest::from_array()` and confirmed to match the caller's expected manifest exactly (`mode`, `source`, and entry records), preventing metadata injection or tampering (`FINAL_MANIFEST_MISMATCH`).
      - Each member stream is read and its SHA-256 checksum and byte size are re-verified independently before publication.
-6. **Atomic Publication & No-Clobber Semantics**:
-   - Destination file must not exist; `PackageArchiveWriter` refuses to overwrite existing files (`DESTINATION_ALREADY_EXISTS`).
-   - Publication uses atomic `rename()` from temporary archive path to destination path.
-   - On Windows or across filesystem boundaries where `rename` cannot overwrite atomically, failure cleanup deletes the temporary archive.
+6. **Atomic No-Clobber Publication & Filesystem Boundary**:
+   - Requires that the staging workspace and destination directory reside on the same filesystem device (`stat['dev']`); cross-device publication fails closed (`ATOMIC_PUBLICATION_UNAVAILABLE`).
+   - Destination file or dangling link must not exist; `PackageArchiveWriter` refuses to overwrite existing files (`DESTINATION_ALREADY_EXISTS`).
+   - Publication uses atomic hardlink creation (`link()`) followed by unlinking the temporary source archive. Because `link()` fails immediately if the target already exists, this eliminates TOCTOU overwrite windows and race conditions without unsafe partial file copying.
 7. **Failure Cleanup Guarantee**:
-   - Any failure during staging, ZIP packing, verification, or publication cleans up all staged temporary files and temporary archive files.
-   - Staging directory is cleaned upon completion or failure.
+   - Any failure during staging, ZIP packing, verification, or publication cleans up only the writer-owned staging files, temporary archives, and the exclusive per-operation subdirectory. Caller files, sentinels, and pre-existing workspace contents remain untouched.
 
 ---
 

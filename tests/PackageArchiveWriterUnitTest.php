@@ -65,7 +65,10 @@ class PackageArchiveWriterUnitTest extends TestCase {
 				continue;
 			}
 			$path = $dir . DIRECTORY_SEPARATOR . $item;
-			if ( is_dir( $path ) ) {
+			if ( is_link( $path ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_unlink, WordPress.WP.AlternativeFunctions.unlink_unlink
+				unlink( $path );
+			} elseif ( is_dir( $path ) ) {
 				$this->recursive_remove_dir( $path );
 			} else {
 				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_unlink, WordPress.WP.AlternativeFunctions.unlink_unlink
@@ -188,8 +191,9 @@ class PackageArchiveWriterUnitTest extends TestCase {
 
 		$zip->close();
 
-		// Ensure staging directory was cleaned up.
-		$this->assertDirectoryDoesNotExist( $staging_dir );
+		// Ensure caller staging parent remains and contains no leftover temporary files.
+		$this->assertDirectoryExists( $staging_dir );
+		$this->assertEmpty( glob( $staging_dir . DIRECTORY_SEPARATOR . 'sc_op_*' ), 'Per-operation subdirectory must be cleaned up.' );
 	}
 
 	/**
@@ -448,7 +452,8 @@ class PackageArchiveWriterUnitTest extends TestCase {
 		$this->assertFalse( $res->is_success() );
 		$this->assertSame( 'CHECKSUM_MISMATCH', $res->get_errors()[0]['code'] );
 		$this->assertFileDoesNotExist( $output_path );
-		$this->assertDirectoryDoesNotExist( $staging_dir );
+		$this->assertDirectoryExists( $staging_dir );
+		$this->assertEmpty( glob( $staging_dir . DIRECTORY_SEPARATOR . 'sc_op_*' ), 'Operation subdirectory must be cleaned up on failure.' );
 	}
 
 	/**
@@ -486,7 +491,8 @@ class PackageArchiveWriterUnitTest extends TestCase {
 		$this->assertFalse( $res->is_success() );
 		$this->assertSame( 'SIZE_MISMATCH', $res->get_errors()[0]['code'] );
 		$this->assertFileDoesNotExist( $output_path );
-		$this->assertDirectoryDoesNotExist( $staging_dir );
+		$this->assertDirectoryExists( $staging_dir );
+		$this->assertEmpty( glob( $staging_dir . DIRECTORY_SEPARATOR . 'sc_op_*' ), 'Operation subdirectory must be cleaned up on failure.' );
 	}
 
 	/**
@@ -982,5 +988,362 @@ class PackageArchiveWriterUnitTest extends TestCase {
 		$this->assertFalse( $res->is_success() );
 		$this->assertSame( 'ZIP_CAPABILITY_UNAVAILABLE', $res->get_errors()[0]['code'] );
 		$this->assertFileDoesNotExist( $output_path );
+	}
+
+	/**
+	 * Test that staging directory parent sentinels and external files are preserved on success and failure.
+	 */
+	public function test_staging_parent_sentinels_preserved_on_success_and_failure() {
+		$staging_parent = $this->temp_dir . DIRECTORY_SEPARATOR . 'caller_workspace';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
+		mkdir( $staging_parent, 0700, true );
+
+		// Prepopulate caller staging parent with sentinel file and nested subdirectory.
+		$sentinel_file = $staging_parent . DIRECTORY_SEPARATOR . 'caller_data.txt';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+		file_put_contents( $sentinel_file, 'CRITICAL_CALLER_DATA' );
+
+		$sentinel_subdir = $staging_parent . DIRECTORY_SEPARATOR . 'caller_subdir';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
+		mkdir( $sentinel_subdir, 0700, true );
+		$sentinel_subfile = $sentinel_subdir . DIRECTORY_SEPARATOR . 'nested.txt';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+		file_put_contents( $sentinel_subfile, 'NESTED_DATA' );
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/empty.txt',
+				'size'   => 0,
+				'sha256' => hash( 'sha256', '' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'success.zip';
+		$writer      = new PackageArchiveWriter();
+
+		// 1. Success case.
+		$res = $writer->write(
+			$manifest,
+			array( 'assets/empty.txt' => $this->create_stream( '' ) ),
+			$output_path,
+			$staging_parent
+		);
+
+		$this->assertTrue( $res->is_success() );
+		$this->assertFileExists( $sentinel_file, 'Caller sentinel file must not be erased on success.' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		$this->assertSame( 'CRITICAL_CALLER_DATA', file_get_contents( $sentinel_file ) );
+		$this->assertFileExists( $sentinel_subfile, 'Caller nested file must not be erased on success.' );
+
+		// 2. Failure case (corrupt hash).
+		$fail_output = $this->temp_dir . DIRECTORY_SEPARATOR . 'fail.zip';
+		$res_fail    = $writer->write(
+			$manifest,
+			array( 'assets/empty.txt' => $this->create_stream( 'corrupted_bytes' ) ),
+			$fail_output,
+			$staging_parent
+		);
+
+		$this->assertFalse( $res_fail->is_success() );
+		$this->assertFileExists( $sentinel_file, 'Caller sentinel file must not be erased on failure.' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		$this->assertSame( 'CRITICAL_CALLER_DATA', file_get_contents( $sentinel_file ) );
+		$this->assertFileExists( $sentinel_subfile, 'Caller nested file must not be erased on failure.' );
+		$this->assertDirectoryExists( $staging_parent, 'Caller staging parent directory itself must remain intact.' );
+	}
+
+	/**
+	 * Test late destination race condition: destination file created before publication must not be clobbered.
+	 */
+	public function test_late_destination_creation_prevents_clobber_and_cleans_up() {
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'raced_output.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'raced_stg';
+
+		// Subclass writer that creates a destination file right before finalize/publish.
+		$writer = new class( $output_path ) extends PackageArchiveWriter {
+			/**
+			 * Target output destination file.
+			 *
+			 * @var string
+			 */
+			private $target_output;
+
+			/**
+			 * Constructor.
+			 *
+			 * @param string $target_output Target output file.
+			 */
+			public function __construct( $target_output ) {
+				parent::__construct();
+				$this->target_output = $target_output;
+			}
+
+			/**
+			 * Hook before close zip to simulate racing process creating destination file.
+			 *
+			 * @param ZipArchive $zip Zip instance.
+			 * @param string     $temp_archive_path Temporary archive path.
+			 */
+			protected function before_close_zip( ZipArchive $zip, $temp_archive_path ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+				file_put_contents( $this->target_output, 'RACED_DESTINATION_PAYLOAD_MUST_NOT_OVERWRITE' );
+			}
+		};
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/empty.txt',
+				'size'   => 0,
+				'sha256' => hash( 'sha256', '' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$res = $writer->write(
+			$manifest,
+			array( 'assets/empty.txt' => $this->create_stream( '' ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success(), 'Publication must fail when destination is created by a racing process.' );
+		$this->assertSame( 'DESTINATION_ALREADY_EXISTS', $res->get_errors()[0]['code'] );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		$this->assertSame( 'RACED_DESTINATION_PAYLOAD_MUST_NOT_OVERWRITE', file_get_contents( $output_path ) );
+	}
+
+	/**
+	 * Test rejection when finalized ZIP manifest is altered (e.g. Mode or source changed).
+	 */
+	public function test_finalized_zip_manifest_modification_rejected() {
+		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Hook before close zip to inject an altered manifest.json.
+			 *
+			 * @param ZipArchive $zip Zip instance.
+			 * @param string     $temp_archive_path Temporary archive path.
+			 */
+			protected function before_close_zip( ZipArchive $zip, $temp_archive_path ) {
+				// Tamper with manifest.json: alter migration mode to an unexpected mode with valid topology.
+				$tampered_manifest = array(
+					'format_version' => '1.0',
+					'mode'           => MigrationMode::FULL_NETWORK_TO_NEW_ENV,
+					'source'         => array(
+						'is_multisite' => true,
+						'network_id'   => 1,
+						'site_count'   => 10,
+						'base_prefix'  => 'wp_',
+					),
+					'entries'        => array(
+						array(
+							'path'   => 'assets/empty.txt',
+							'size'   => 0,
+							'sha256' => hash( 'sha256', '' ),
+						),
+					),
+				);
+				$zip->addFromString( 'manifest.json', (string) wp_json_encode( $tampered_manifest ) );
+			}
+		};
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/empty.txt',
+				'size'   => 0,
+				'sha256' => hash( 'sha256', '' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'tampered.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'tampered_stg';
+
+		$res = $writer->write(
+			$manifest,
+			array( 'assets/empty.txt' => $this->create_stream( '' ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'FINAL_MANIFEST_MISMATCH', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+	}
+
+	/**
+	 * Test rejection when destination path or staging parent path has ancestor symlinks.
+	 */
+	public function test_symlinked_destination_ancestor_rejected() {
+		// Create a real directory and a symlink to it.
+		$real_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'real_dir';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
+		mkdir( $real_dir, 0700, true );
+
+		$link_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'link_dir';
+		// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+		if ( ! function_exists( 'symlink' ) || false === @symlink( $real_dir, $link_dir ) ) {
+			$this->markTestSkipped( 'symlink() function not supported or permitted on this system.' );
+		}
+
+		$output_path = $link_dir . DIRECTORY_SEPARATOR . 'test.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'stg';
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/empty.txt',
+				'size'   => 0,
+				'sha256' => hash( 'sha256', '' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$writer = new PackageArchiveWriter();
+		$res    = $writer->write(
+			$manifest,
+			array( 'assets/empty.txt' => $this->create_stream( '' ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'SYMLINK_PATH_PROHIBITED', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+	}
+
+	/**
+	 * Test rejection when manifest.json exceeds maximum size limit.
+	 */
+	public function test_manifest_exceeding_size_limit_rejected() {
+		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Hook before close zip to inject an oversized manifest.json.
+			 *
+			 * @param ZipArchive $zip Zip instance.
+			 * @param string     $temp_archive_path Temporary archive path.
+			 */
+			protected function before_close_zip( ZipArchive $zip, $temp_archive_path ) {
+				// Create a manifest of > 2MB.
+				$oversized_str = str_repeat( ' ', 2097153 );
+				$zip->addFromString( 'manifest.json', '{"format_version":"1.0","padding":"' . $oversized_str . '"}' );
+			}
+		};
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/empty.txt',
+				'size'   => 0,
+				'sha256' => hash( 'sha256', '' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'oversized_manifest.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'oversized_stg';
+
+		$res = $writer->write(
+			$manifest,
+			array( 'assets/empty.txt' => $this->create_stream( '' ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'MANIFEST_EXCEEDS_SIZE_LIMIT', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+	}
+
+	/**
+	 * Test rejection when atomic publication primitive is unavailable or fails.
+	 */
+	public function test_atomic_publication_failure_simulation() {
+		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Override publish primitive to simulate atomic publication failure.
+			 *
+			 * @param string $source_path Source temp path.
+			 * @param string $destination_path Destination path.
+			 * @return array{success: bool, code: string, message: string}
+			 */
+			protected function publish_archive_no_clobber( $source_path, $destination_path ) {
+				return array(
+					'success' => false,
+					'code'    => 'ATOMIC_PUBLICATION_UNAVAILABLE',
+					'message' => 'Simulated publication primitive failure.',
+				);
+			}
+		};
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/empty.txt',
+				'size'   => 0,
+				'sha256' => hash( 'sha256', '' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'atomic_fail.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'atomic_stg';
+
+		$res = $writer->write(
+			$manifest,
+			array( 'assets/empty.txt' => $this->create_stream( '' ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'ATOMIC_PUBLICATION_UNAVAILABLE', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+		$this->assertEmpty( glob( $staging_dir . DIRECTORY_SEPARATOR . 'sc_op_*' ), 'Staging files must be cleaned up on publish failure.' );
 	}
 }
