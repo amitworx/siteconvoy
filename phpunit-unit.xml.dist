@@ -19,6 +19,7 @@
         <testsuite name="SiteConvoy Unit Test Suite">
             <file>./tests/PluginUnitTest.php</file>
             <file>./tests/DiscoveryContractsUnitTest.php</file>
+            <file>./tests/MigrationPlanUnitTest.php</file>
         </testsuite>
     </testsuites>
 </phpunit>

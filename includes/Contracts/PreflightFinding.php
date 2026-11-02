@@ -155,7 +155,7 @@ class PreflightFinding implements \JsonSerializable {
 			'id'       => $this->id,
 			'severity' => $this->severity,
 			'message'  => $this->message,
-			'context'  => $this->context,
+			'context'  => ! empty( $this->context ) ? $this->context : (object) array(),
 		);
 	}
 

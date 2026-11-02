@@ -134,12 +134,25 @@ class SourceDiscoveryService {
 	 * @param int      $batch_size Page size per query (default 100).
 	 * @param int|null $network_id Optional explicit network ID (defaults to current network ID).
 	 * @return array<int, array<string, mixed>> List of normalized site summaries belonging to the network.
+	 * @throws \InvalidArgumentException When non-current network ID is passed.
 	 */
 	public function enumerate_network_sites( $batch_size = 100, $network_id = null ) {
 		$this->assert_authorized();
 
-		$is_multisite      = function_exists( 'is_multisite' ) && is_multisite();
-		$target_network_id = null !== $network_id ? (int) $network_id : $this->resolve_current_network_id( $is_multisite );
+		$is_multisite   = function_exists( 'is_multisite' ) && is_multisite();
+		$current_net_id = $this->resolve_current_network_id( $is_multisite );
+
+		if ( null !== $network_id && (int) $network_id !== (int) $current_net_id ) {
+			throw new \InvalidArgumentException(
+				sprintf(
+					'Network enumeration is scoped strictly to the current network ID %d; foreign network ID %d is prohibited.',
+					(int) $current_net_id,
+					(int) $network_id
+				)
+			);
+		}
+
+		$target_network_id = $current_net_id;
 		$batch_size        = max( 1, (int) $batch_size );
 		$offset            = 0;
 		$all_sites         = array();
@@ -362,11 +375,15 @@ class SourceDiscoveryService {
 	 * @return array<string, mixed>
 	 */
 	private function inspect_tables( $site_id, $is_multisite, array $network_sites, $wpdb ) {
-		// Fetch physical tables in current database via SHOW TABLES.
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
-		$physical_tables = $wpdb->get_col( 'SHOW TABLES' );
-		if ( ! is_array( $physical_tables ) ) {
-			$physical_tables = array();
+		// Fetch physical tables in current database via SHOW TABLES (or overrides for tests).
+		if ( array_key_exists( 'physical_tables', $this->overrides ) && is_array( $this->overrides['physical_tables'] ) ) {
+			$physical_tables = $this->overrides['physical_tables'];
+		} else {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
+			$physical_tables = $wpdb->get_col( 'SHOW TABLES' );
+			if ( ! is_array( $physical_tables ) ) {
+				$physical_tables = array();
+			}
 		}
 		$physical_lookup = array_fill_keys( $physical_tables, true );
 
@@ -498,12 +515,13 @@ class SourceDiscoveryService {
 		}
 
 		return array(
-			'core_blog'        => $core_blog,
-			'core_global'      => $core_global,
-			'core_ms_global'   => $core_ms_global,
-			'core_old'         => $core_old,
-			'legacy_multisite' => $legacy_multisite,
-			'unknown_custom'   => array(
+			'physical_table_names' => array_values( $physical_tables ),
+			'core_blog'            => $core_blog,
+			'core_global'          => $core_global,
+			'core_ms_global'       => $core_ms_global,
+			'core_old'             => $core_old,
+			'legacy_multisite'     => $legacy_multisite,
+			'unknown_custom'       => array(
 				'blog_prefix_matched' => $blog_prefix_matched,
 				'base_prefix_matched' => $base_prefix_matched,
 				'unprefixed_other'    => $unprefixed_other,

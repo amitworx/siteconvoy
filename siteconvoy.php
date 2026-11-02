@@ -38,8 +38,10 @@ if ( ! defined( 'SITECONVOY_PATH' ) ) {
 require_once SITECONVOY_PATH . 'includes/Contracts/MigrationMode.php';
 require_once SITECONVOY_PATH . 'includes/Contracts/PreflightFinding.php';
 require_once SITECONVOY_PATH . 'includes/Contracts/PreflightReport.php';
+require_once SITECONVOY_PATH . 'includes/Contracts/MigrationPlan.php';
 require_once SITECONVOY_PATH . 'includes/Discovery/SourceDiscoveryService.php';
 require_once SITECONVOY_PATH . 'includes/Preflight/PreflightService.php';
+require_once SITECONVOY_PATH . 'includes/Planning/MigrationScopePlanner.php';
 
 /**
  * Inert plugin initialization hook.

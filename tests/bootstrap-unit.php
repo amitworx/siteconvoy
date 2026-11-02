@@ -12,6 +12,8 @@ if ( file_exists( dirname( __DIR__ ) . '/vendor/autoload.php' ) ) {
 	require_once dirname( __DIR__ ) . '/vendor/autoload.php';
 }
 
+require_once __DIR__ . '/JsonSchemaValidator.php';
+
 if ( ! function_exists( 'plugin_dir_path' ) ) {
 	/**
 	 * Minimal stub for plugin_dir_path() during standalone unit tests.
@@ -41,5 +43,20 @@ if ( ! function_exists( 'add_action' ) ) {
 			'accepted_args' => $accepted_args,
 		);
 		return true;
+	}
+}
+
+if ( ! function_exists( 'wp_json_encode' ) ) {
+	/**
+	 * Minimal stub for wp_json_encode() during standalone unit tests.
+	 *
+	 * @param mixed $data    Data to encode.
+	 * @param int   $options JSON options.
+	 * @param int   $depth   Depth.
+	 * @return string|false JSON string or false.
+	 */
+	function wp_json_encode( $data, $options = 0, $depth = 512 ) { // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode
+		return json_encode( $data, $options, $depth );
 	}
 }
