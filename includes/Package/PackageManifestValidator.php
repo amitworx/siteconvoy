@@ -137,7 +137,15 @@ class PackageManifestValidator {
 				);
 			}
 
-			// Path traversal check.
+			// Reject Alternate Data Stream colon syntax in segment.
+			if ( str_contains( $segment, ':' ) ) {
+				return array(
+					'valid' => false,
+					'error' => 'Alternate data stream colon syntax is prohibited in path segments.',
+				);
+			}
+
+			// Path traversal check (must precede trailing space/dot check).
 			if ( '.' === $segment || '..' === $segment ) {
 				return array(
 					'valid' => false,
@@ -145,31 +153,62 @@ class PackageManifestValidator {
 				);
 			}
 
-			// Check Windows reserved devices.
-			$segment_base = strtoupper( (string) pathinfo( $segment, PATHINFO_FILENAME ) );
+			// Reject Windows trailing spaces and trailing dots in path segments.
+			if ( preg_match( '/[ .]$/', $segment ) ) {
+				return array(
+					'valid' => false,
+					'error' => 'Path segment ending with space or dot is prohibited.',
+				);
+			}
+
+			// Check Windows reserved devices (strip extension or multiple dots).
+			$segment_base = strtoupper( (string) strtok( $segment, '.' ) );
 			if ( in_array( $segment_base, self::WINDOWS_RESERVED_DEVICES, true ) ) {
 				return array(
 					'valid' => false,
-					'error' => sprintf( 'Reserved device name "%s" is prohibited.', $segment ),
+					'error' => 'Reserved device name is prohibited.',
 				);
 			}
 		}
 
-		$filename = end( $segments );
+		// Require at least two segments: approved root folder and regular filename.
+		if ( count( $segments ) < 2 ) {
+			// Check if single segment was a reserved or prohibited file for clear reporting.
+			$basename = $segments[0];
+			if ( in_array( strtolower( $basename ), self::RESERVED_FILENAMES, true ) ) {
+				return array(
+					'valid' => false,
+					'error' => 'Reserved filename is prohibited.',
+				);
+			}
+			if ( in_array( strtolower( $basename ), self::PROHIBITED_NAMES, true ) ) {
+				return array(
+					'valid' => false,
+					'error' => 'Prohibited path is not allowed in packages.',
+				);
+			}
 
-		// Check reserved metadata files.
-		if ( in_array( strtolower( $filename ), self::RESERVED_FILENAMES, true ) ) {
 			return array(
 				'valid' => false,
-				'error' => sprintf( 'Reserved filename "%s" is prohibited.', $filename ),
+				'error' => 'Path must specify at least a root directory and a filename segment.',
 			);
 		}
 
-		// Check prohibited files.
+		$filename = end( $segments );
+
+		// Check reserved metadata files on final segment.
+		if ( in_array( strtolower( $filename ), self::RESERVED_FILENAMES, true ) ) {
+			return array(
+				'valid' => false,
+				'error' => 'Reserved filename is prohibited.',
+			);
+		}
+
+		// Check prohibited files on final segment.
 		if ( in_array( strtolower( $filename ), self::PROHIBITED_NAMES, true ) ) {
 			return array(
 				'valid' => false,
-				'error' => sprintf( 'Prohibited path "%s" is not allowed in packages.', $filename ),
+				'error' => 'Prohibited path is not allowed in packages.',
 			);
 		}
 
@@ -195,6 +234,17 @@ class PackageManifestValidator {
 	 * @return array{valid: bool, error: string} Validation result.
 	 */
 	public static function validate_entry( array $entry ) {
+		// Reject unknown extraneous keys.
+		$allowed_keys = array( 'path', 'size', 'sha256', 'type' );
+		foreach ( array_keys( $entry ) as $key ) {
+			if ( ! in_array( $key, $allowed_keys, true ) ) {
+				return array(
+					'valid' => false,
+					'error' => sprintf( 'Extraneous entry key "%s" is prohibited.', $key ),
+				);
+			}
+		}
+
 		if ( ! isset( $entry['path'] ) || ! is_string( $entry['path'] ) ) {
 			return array(
 				'valid' => false,
@@ -219,6 +269,16 @@ class PackageManifestValidator {
 				'valid' => false,
 				'error' => 'Entry "sha256" must be a 64-character lowercase hexadecimal hash.',
 			);
+		}
+
+		// Enforce regular file type: reject symlink, hardlink, directory, or device.
+		if ( isset( $entry['type'] ) ) {
+			if ( 'regular' !== $entry['type'] ) {
+				return array(
+					'valid' => false,
+					'error' => sprintf( 'Non-regular entry type "%s" is prohibited. Only "regular" files allowed.', $entry['type'] ),
+				);
+			}
 		}
 
 		return array(

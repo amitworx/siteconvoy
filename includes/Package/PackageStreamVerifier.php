@@ -63,9 +63,25 @@ class PackageStreamVerifier {
 			if ( ! isset( $manifest_paths[ $stream_path ] ) ) {
 				$errors[] = array(
 					'code'    => 'UNEXPECTED_STREAM',
-					'path'    => $stream_path,
-					'message' => sprintf( 'Stream map contains unexpected entry "%s" not declared in manifest.', $stream_path ),
+					'path'    => '',
+					'message' => 'Stream map contains an unexpected stream entry not declared in manifest.',
 				);
+			}
+		}
+
+		// Check for duplicate stream handles delivered across distinct entry keys.
+		$seen_stream_ids = array();
+		foreach ( $stream_map as $path_key => $stream_res ) {
+			if ( is_resource( $stream_res ) ) {
+				$res_id = (int) $stream_res;
+				if ( isset( $seen_stream_ids[ $res_id ] ) ) {
+					$errors[] = array(
+						'code'    => 'DUPLICATE_STREAM_RESOURCE',
+						'path'    => isset( $manifest_paths[ $path_key ] ) ? (string) $path_key : '',
+						'message' => 'Duplicate stream handle delivered to multiple entries.',
+					);
+				}
+				$seen_stream_ids[ $res_id ] = true;
 			}
 		}
 
@@ -91,6 +107,17 @@ class PackageStreamVerifier {
 						'code'    => 'INVALID_STREAM_RESOURCE',
 						'path'    => $path,
 						'message' => sprintf( 'Supplied stream for "%s" is not a valid stream resource.', $path ),
+					);
+					continue;
+				}
+
+				// Validate stream wrapper: prohibit network, non-local, or unreadable streams.
+				$meta = stream_get_meta_data( $stream );
+				if ( isset( $meta['wrapper_type'] ) && 'http' === strtolower( substr( $meta['wrapper_type'], 0, 4 ) ) ) {
+					$errors[] = array(
+						'code'    => 'DISALLOWED_STREAM_WRAPPER',
+						'path'    => $path,
+						'message' => sprintf( 'Stream "%s" uses disallowed network wrapper.', $path ),
 					);
 					continue;
 				}
@@ -147,6 +174,13 @@ class PackageStreamVerifier {
 			}
 
 			if ( '' === $chunk ) {
+				if ( ! feof( $stream ) ) {
+					return array(
+						'valid'   => false,
+						'code'    => 'STREAM_READ_STALLED',
+						'message' => sprintf( 'Stream "%s" read stalled before reaching EOF.', $path ),
+					);
+				}
 				break;
 			}
 

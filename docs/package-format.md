@@ -40,11 +40,15 @@ Only three root directory prefixes are permitted for entry paths:
 2. `uploads/` &mdash; Media and uploaded content files.
 3. `assets/` &mdash; Metadata and plugin/theme asset definitions.
 
+Paths must contain at least two segments (e.g. `root/filename`); bare root names without payload filenames are prohibited.
+
 ### Prohibited & Reserved Paths
-- **Reserved Metadata**: `manifest.json` and `checksums.sha256` are package governance files and may not appear as regular payload entries.
+- **Reserved Metadata**: `manifest.json` and `checksums.sha256` are package governance files and may not appear as regular payload entries. Future readers may consume `checksums.sha256` as an optional, redundant standard listing (e.g., for standard command-line tools like `sha256sum -c checksums.sha256`), while `manifest.json` remains the authoritative contract for archive structure and verification.
 - **Prohibited Sensitive Files**: `wp-config.php`, `.env`, `.htaccess`, and `web.config` are strictly rejected.
-- **Windows Device Names**: Reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`) are rejected across all platforms to prevent cross-platform extraction vulnerabilities.
+- **Windows Device Names & Trailing Aliases**: Reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`) with or without arbitrary extensions, trailing spaces/dots in path segments (e.g. `foo. `), and Alternate Data Stream colon syntax (e.g. `file.txt:stream`) are rejected across all platforms to prevent cross-platform extraction vulnerabilities.
 - **Traversal & Absolute Paths**: Slashes at start (`/`), Windows backslashes (`\`), drive letters (`C:`), UNC paths (`//`), null bytes (`\0`), and path traversal segments (`.` or `..`) are rejected immediately.
+- **Unicode & Casefold Ambiguities**: Entry paths must be valid UTF-8 strings. Cross-platform casefold collisions (e.g. `uploads/photo.jpg` vs `uploads/PHOTO.JPG`) fail closed to ensure deterministic reproducibility across Windows, Linux, and macOS.
+- **Entry Types**: Only `regular` files are allowed; non-regular files (`symlink`, `hardlink`, `directory`, `device`) and unrecognized metadata keys fail closed.
 
 ---
 

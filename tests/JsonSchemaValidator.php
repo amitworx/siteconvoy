@@ -101,6 +101,22 @@ class JsonSchemaValidator {
 			}
 		}
 
+		// 4b. Validate minimum (for numbers/integers).
+		if ( isset( $schema['minimum'] ) && ( is_int( $data ) || is_float( $data ) ) ) {
+			if ( $data < $schema['minimum'] ) {
+				$errors[] = sprintf( '%s: expected minimum %s, got %s', $path, (string) $schema['minimum'], (string) $data );
+			}
+		}
+
+		// 4c. Validate pattern (for strings).
+		if ( isset( $schema['pattern'] ) && is_string( $data ) ) {
+			$delimiter = '#';
+			$pattern   = $delimiter . str_replace( $delimiter, '\\' . $delimiter, $schema['pattern'] ) . $delimiter;
+			if ( ! preg_match( $pattern, $data ) ) {
+				$errors[] = sprintf( '%s: string does not match pattern "%s"', $path, $schema['pattern'] );
+			}
+		}
+
 		// 5. Validate object properties and required keys.
 		if ( is_object( $data ) ) {
 			$data_vars = get_object_vars( $data );
@@ -118,6 +134,26 @@ class JsonSchemaValidator {
 					if ( isset( $schema['properties'][ $prop ] ) ) {
 						$sub_errors = self::validate( $val, $schema['properties'][ $prop ], $path . '.' . $prop );
 						$errors     = array_merge( $errors, $sub_errors );
+					}
+				}
+			}
+
+			// Validate additionalProperties.
+			if ( array_key_exists( 'additionalProperties', $schema ) ) {
+				if ( false === $schema['additionalProperties'] ) {
+					$allowed_props = isset( $schema['properties'] ) && is_array( $schema['properties'] ) ? array_keys( $schema['properties'] ) : array();
+					foreach ( array_keys( $data_vars ) as $prop ) {
+						if ( ! in_array( $prop, $allowed_props, true ) ) {
+							$errors[] = sprintf( '%s: additional property "%s" is not allowed', $path, $prop );
+						}
+					}
+				} elseif ( is_array( $schema['additionalProperties'] ) ) {
+					$allowed_props = isset( $schema['properties'] ) && is_array( $schema['properties'] ) ? array_keys( $schema['properties'] ) : array();
+					foreach ( $data_vars as $prop => $val ) {
+						if ( ! in_array( $prop, $allowed_props, true ) ) {
+							$sub_errors = self::validate( $val, $schema['additionalProperties'], $path . '.' . $prop );
+							$errors     = array_merge( $errors, $sub_errors );
+						}
 					}
 				}
 			}

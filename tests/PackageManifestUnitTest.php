@@ -92,6 +92,8 @@ class PackageManifestUnitTest extends TestCase {
 		$source = array(
 			'is_multisite' => false,
 			'site_id'      => 1,
+			'network_id'   => null,
+			'base_prefix'  => 'wp_',
 		);
 
 		// Unordered entries.
@@ -209,6 +211,8 @@ class PackageManifestUnitTest extends TestCase {
 			array(
 				'is_multisite' => true,
 				'site_id'      => 2,
+				'network_id'   => 1,
+				'base_prefix'  => 'wp_',
 			),
 			$entries
 		);
@@ -266,6 +270,8 @@ class PackageManifestUnitTest extends TestCase {
 			array(
 				'is_multisite' => false,
 				'site_id'      => 1,
+				'network_id'   => null,
+				'base_prefix'  => 'wp_',
 			),
 			$entries
 		);
@@ -325,5 +331,227 @@ class PackageManifestUnitTest extends TestCase {
 		);
 		$this->assertFalse( $res5->is_success() );
 		$this->assertSame( 'UNEXPECTED_STREAM', $res5->get_errors()[0]['code'] );
+	}
+
+	/**
+	 * Test that source topology rejects unexpected keys, credentials, and mode contradictions.
+	 */
+	public function test_manifest_rejects_source_topology_violations_and_secrets() {
+		$valid_entries = array(
+			array(
+				'path'   => 'database/schema.sql',
+				'size'   => 10,
+				'sha256' => hash( 'sha256', '1234567890' ),
+			),
+		);
+
+		// 1. Secret keys rejected.
+		$secret_source = array(
+			'is_multisite' => false,
+			'site_id'      => 1,
+			'network_id'   => null,
+			'base_prefix'  => 'wp_',
+			'db_password'  => 'secret_pass_123',
+		);
+		try {
+			new PackageManifest( MigrationMode::STANDALONE_TO_SUBSITE, $secret_source, $valid_entries );
+			$this->fail( 'Expected InvalidArgumentException for unexpected secret key in source.' );
+		} catch ( \InvalidArgumentException $e ) {
+			$this->assertStringContainsString( 'Unexpected key "db_password"', $e->getMessage() );
+		}
+
+		// 2. Mode contradictions: subsite_to_standalone with is_multisite = false.
+		$invalid_mode_source1 = array(
+			'is_multisite' => false,
+			'network_id'   => null,
+			'site_id'      => 2,
+			'base_prefix'  => 'wp_',
+		);
+		try {
+			new PackageManifest( MigrationMode::SUBSITE_TO_STANDALONE, $invalid_mode_source1, $valid_entries );
+			$this->fail( 'Expected InvalidArgumentException for subsite mode with is_multisite=false.' );
+		} catch ( \InvalidArgumentException $e ) {
+			$this->assertStringContainsString( 'is_multisite', $e->getMessage() );
+		}
+
+		// 3. Mode contradictions: full_network_to_new_env with site_id set.
+		$invalid_mode_source2 = array(
+			'is_multisite' => true,
+			'network_id'   => 1,
+			'site_id'      => 2,
+			'site_count'   => 5,
+			'base_prefix'  => 'wp_',
+		);
+		try {
+			new PackageManifest( MigrationMode::FULL_NETWORK_TO_NEW_ENV, $invalid_mode_source2, $valid_entries );
+			$this->fail( 'Expected InvalidArgumentException for full_network with non-null site_id.' );
+		} catch ( \InvalidArgumentException $e ) {
+			$this->assertStringContainsString( 'site_id', $e->getMessage() );
+		}
+
+		// 4. Mode contradictions: standalone_to_subsite with is_multisite = true.
+		$invalid_mode_source3 = array(
+			'is_multisite' => true,
+			'network_id'   => 1,
+			'site_id'      => 1,
+			'base_prefix'  => 'wp_',
+		);
+		try {
+			new PackageManifest( MigrationMode::STANDALONE_TO_SUBSITE, $invalid_mode_source3, $valid_entries );
+			$this->fail( 'Expected InvalidArgumentException for standalone_to_subsite with is_multisite=true.' );
+		} catch ( \InvalidArgumentException $e ) {
+			$this->assertStringContainsString( 'is_multisite', $e->getMessage() );
+		}
+	}
+
+	/**
+	 * Test from_array() validates raw parsed manifest input including format_version and top-level keys.
+	 */
+	public function test_from_array_validates_untrusted_input() {
+		$valid_raw = array(
+			'format_version' => '1.0',
+			'mode'           => MigrationMode::STANDALONE_TO_SUBSITE,
+			'source'         => array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'network_id'   => null,
+				'base_prefix'  => 'wp_',
+			),
+			'entries'        => array(
+				array(
+					'path'   => 'database/schema.sql',
+					'size'   => 10,
+					'sha256' => hash( 'sha256', '1234567890' ),
+				),
+			),
+		);
+
+		// Valid instantiation.
+		$manifest = PackageManifest::from_array( $valid_raw );
+		$this->assertSame( '1.0', $manifest->get_format_version() );
+
+		// Unsupported format version fails closed.
+		$unsupported_version                   = $valid_raw;
+		$unsupported_version['format_version'] = '2.0';
+		try {
+			PackageManifest::from_array( $unsupported_version );
+			$this->fail( 'Expected InvalidArgumentException for unsupported format_version.' );
+		} catch ( \InvalidArgumentException $e ) {
+			$this->assertStringContainsString( 'Unsupported format_version "2.0"', $e->getMessage() );
+		}
+
+		// Extraneous top-level key rejected.
+		$extra_top                = $valid_raw;
+		$extra_top['extra_field'] = 'attack';
+		try {
+			PackageManifest::from_array( $extra_top );
+			$this->fail( 'Expected InvalidArgumentException for extra top-level key.' );
+		} catch ( \InvalidArgumentException $e ) {
+			$this->assertStringContainsString( 'Unexpected top-level property "extra_field"', $e->getMessage() );
+		}
+	}
+
+	/**
+	 * Test path and entry validation for unsafe aliases, non-regular entry metadata, and ADS.
+	 */
+	public function test_path_and_entry_validation_hardening() {
+		// 1. Root-only directory name without second segment must fail.
+		$res1 = PackageManifestValidator::validate_path( 'database' );
+		$this->assertFalse( $res1['valid'] );
+
+		// 2. Windows trailing dot/space segments must fail.
+		$res2 = PackageManifestValidator::validate_path( 'uploads/foo. ' );
+		$this->assertFalse( $res2['valid'] );
+
+		$res3 = PackageManifestValidator::validate_path( 'uploads/CON.txt.' );
+		$this->assertFalse( $res3['valid'] );
+
+		// 3. Alternate Data Stream colon syntax must fail.
+		$res4 = PackageManifestValidator::validate_path( 'uploads/file.txt:stream' );
+		$this->assertFalse( $res4['valid'] );
+
+		// 4. Non-regular entry type (symlink, hardlink, directory) must fail.
+		$entry_symlink = array(
+			'path'   => 'database/schema.sql',
+			'size'   => 10,
+			'sha256' => hash( 'sha256', '1234567890' ),
+			'type'   => 'symlink',
+		);
+		$res5          = PackageManifestValidator::validate_entry( $entry_symlink );
+		$this->assertFalse( $res5['valid'] );
+
+		// 5. Unknown extraneous entry property must fail.
+		$entry_extra = array(
+			'path'        => 'database/schema.sql',
+			'size'        => 10,
+			'sha256'      => hash( 'sha256', '1234567890' ),
+			'permissions' => 0777,
+		);
+		$res6        = PackageManifestValidator::validate_entry( $entry_extra );
+		$this->assertFalse( $res6['valid'] );
+	}
+
+	/**
+	 * Test stream verifier sanitizes paths, fails on non-local wrappers, handles non-EOF empty reads, and rejects duplicate handles.
+	 */
+	public function test_stream_verifier_security_hardening() {
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'network_id'   => null,
+				'base_prefix'  => 'wp_',
+			),
+			array(
+				array(
+					'path'   => 'database/schema.sql',
+					'size'   => 5,
+					'sha256' => hash( 'sha256', 'hello' ),
+				),
+				array(
+					'path'   => 'assets/empty.txt',
+					'size'   => 0,
+					'sha256' => hash( 'sha256', '' ),
+				),
+			)
+		);
+
+		$verifier = new PackageStreamVerifier();
+
+		// 1. Secret/sensitive path in unexpected stream is sanitized.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$s1 = fopen( 'php://temp', 'r+' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$s2 = fopen( 'php://temp', 'r+' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$s_secret    = fopen( 'php://temp', 'r+' );
+		$hostile_key = '/etc/shadow/super_secret_user_password';
+
+		$res = $verifier->verify(
+			$manifest,
+			array(
+				'database/schema.sql' => $s1,
+				'assets/empty.txt'    => $s2,
+				$hostile_key          => $s_secret,
+			)
+		);
+		$this->assertFalse( $res->is_success() );
+		$json_out = wp_json_encode( $res );
+		$this->assertStringNotContainsString( 'super_secret_user_password', (string) $json_out );
+		$this->assertStringNotContainsString( '/etc/shadow', (string) $json_out );
+
+		// 2. Duplicate stream handle supplied to multiple entries is rejected.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$s_shared = fopen( 'php://temp', 'r+' );
+		$res_dup  = $verifier->verify(
+			$manifest,
+			array(
+				'database/schema.sql' => $s_shared,
+				'assets/empty.txt'    => $s_shared,
+			)
+		);
+		$this->assertFalse( $res_dup->is_success() );
+		$this->assertSame( 'DUPLICATE_STREAM_RESOURCE', $res_dup->get_errors()[0]['code'] );
 	}
 }
