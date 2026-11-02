@@ -83,7 +83,9 @@ Each table entry in the manifest receives a status:
 - **Site ID validation**: `$source_site_id` must be `null`.
 - **Multi-network guard**: If more than 1 network exists in `wp_site`, planning is blocked (`SC_MULTI_NETWORK_UNSUPPORTED`).
 - **All Network Sites' Blog tables**: Enumerates all active sites via `get_sites()` and includes core blog tables for every site across the network.
-- **Multisite Global tables**: Marked `status: "included"` under `ms_global` as candidates for network governance transfer.
+- **Physical Existence Verification & Fail-Closed Scoping**: The planner verifies the physical existence of expected core blog tables for all enumerated network sites as well as core `ms_global` tables against the physical table inventory (`SHOW TABLES`). Any missing expected core table is marked with `status: "missing"`. If any core table is missing, the planner transitions to a fail-closed blocked state (`status: "blocked"`, preflight blocker `SC_MISSING_CORE_TABLES_PLAN`, `is_executable: false`).
+- **Deprecated / Legacy Core Tables (`core_old`)**: Deprecated core tables present in the physical database (e.g., `sitecategories`, `categories`) are surfaced under `unresolved` with `status: "needs_review"` and an audit reason identifying them as legacy WordPress core tables for operator evaluation.
+- **Multisite Global tables**: Marked `status: "included"` under `ms_global` as candidates for network governance transfer when physically present.
 - **User identity (`wp_users`, `wp_usermeta`)**: Marked `status: "needs_review"` under `global` with reason: `Network-wide user identity and authentication credentials require verification and password/cookie salt review at target.`.
 - **Unresolved tables**: Marked `status: "unresolved"`.
 
@@ -101,7 +103,8 @@ Each table entry in the manifest receives a status:
 The `dependencies` section inspects active runtime components without serializing code or executing side effects:
 - **Active Plugins**: Extracted from `active_plugins` (or `active_sitewide_plugins` on network mode). Contains plugin file relative paths, Name, and Version (read via `get_file_data()` or `get_plugin_data()`).
 - **Active Theme**: Current stylesheet, template, theme name, version, parent theme (if child theme), and theme text domain.
-- **Drop-Ins & MU-Plugins**: Discovered via `wp_get_mu_plugins()` and standard WordPress drop-in filenames (`advanced-cache.php`, `object-cache.php`, `db.php`, `sunrise.php`).
+- **Drop-Ins & MU-Plugins**: Discovered via `wp_get_mu_plugins()` and standard WordPress drop-in filenames (`advanced-cache.php`, `object-cache.php`, `db.php`, `sunrise.php`). All discovered must-use plugins are captured under the `mu_plugins` dependency key.
+- **Per-Site Dependencies (Full Network)**: In `full_network_to_new_env` mode, per-site theme configurations and active plugin dependencies are safely discovered across all network sites under the `per_site` key, using clean context switching (`switch_to_blog()` wrapped in `try ... finally { restore_current_blog(); }`).
 
 ---
 

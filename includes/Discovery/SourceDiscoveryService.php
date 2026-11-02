@@ -375,11 +375,15 @@ class SourceDiscoveryService {
 	 * @return array<string, mixed>
 	 */
 	private function inspect_tables( $site_id, $is_multisite, array $network_sites, $wpdb ) {
-		// Fetch physical tables in current database via SHOW TABLES.
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
-		$physical_tables = $wpdb->get_col( 'SHOW TABLES' );
-		if ( ! is_array( $physical_tables ) ) {
-			$physical_tables = array();
+		// Fetch physical tables in current database via SHOW TABLES (or overrides for tests).
+		if ( array_key_exists( 'physical_tables', $this->overrides ) && is_array( $this->overrides['physical_tables'] ) ) {
+			$physical_tables = $this->overrides['physical_tables'];
+		} else {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
+			$physical_tables = $wpdb->get_col( 'SHOW TABLES' );
+			if ( ! is_array( $physical_tables ) ) {
+				$physical_tables = array();
+			}
 		}
 		$physical_lookup = array_fill_keys( $physical_tables, true );
 
@@ -511,12 +515,13 @@ class SourceDiscoveryService {
 		}
 
 		return array(
-			'core_blog'        => $core_blog,
-			'core_global'      => $core_global,
-			'core_ms_global'   => $core_ms_global,
-			'core_old'         => $core_old,
-			'legacy_multisite' => $legacy_multisite,
-			'unknown_custom'   => array(
+			'physical_table_names' => array_values( $physical_tables ),
+			'core_blog'            => $core_blog,
+			'core_global'          => $core_global,
+			'core_ms_global'       => $core_ms_global,
+			'core_old'             => $core_old,
+			'legacy_multisite'     => $legacy_multisite,
+			'unknown_custom'       => array(
 				'blog_prefix_matched' => $blog_prefix_matched,
 				'base_prefix_matched' => $base_prefix_matched,
 				'unprefixed_other'    => $unprefixed_other,

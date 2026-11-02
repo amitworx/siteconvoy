@@ -200,6 +200,15 @@ class PreflightReport implements \JsonSerializable {
 	}
 
 	/**
+	 * Get target expectations array.
+	 *
+	 * @return array<string, mixed>
+	 */
+	public function get_target_expectations() {
+		return $this->target_expectations;
+	}
+
+	/**
 	 * Get all preflight findings.
 	 *
 	 * @return PreflightFinding[]

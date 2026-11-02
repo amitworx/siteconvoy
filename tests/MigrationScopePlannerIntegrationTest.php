@@ -125,6 +125,7 @@ class MigrationScopePlannerIntegrationTest extends WP_UnitTestCase {
 			$this->assertContains( $expected_prefix . 'posts', $sub_blog_names );
 			$this->assertNotContains( $wpdb->base_prefix . 'posts', $sub_blog_names );
 		} finally {
+			wp_delete_site( $subsite_id );
 			foreach ( $wpdb->tables( 'blog', true, $subsite_id ) as $tbl ) {
 				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				$wpdb->query( "DROP TABLE IF EXISTS `{$tbl}`" );
@@ -384,7 +385,33 @@ class MigrationScopePlannerIntegrationTest extends WP_UnitTestCase {
 			return array_slice( $simulated_sites, $offset, $number );
 		};
 
-		$discovery = new SourceDiscoveryService( null, $fetcher );
+		// 1. Without physical tables, mocked 120 sites must fail closed with status 'blocked' and missing tables.
+		$discovery_unmocked = new SourceDiscoveryService( null, $fetcher );
+		$preflight_unmocked = new PreflightService( $discovery_unmocked );
+		$planner_unmocked   = new MigrationScopePlanner( $preflight_unmocked, $discovery_unmocked );
+		$plan_unmocked      = $planner_unmocked->plan( MigrationMode::FULL_NETWORK_TO_NEW_ENV );
+
+		$this->assertSame( 'blocked', $plan_unmocked->get_status(), '120 mocked sites without physical tables must fail closed (blocked).' );
+		$this->assertFalse( $plan_unmocked->is_executable() );
+
+		// 2. When physical tables are present in catalog, planner produces a valid 'needs_review' plan with 120 sites.
+		$mock_physical = array();
+		global $wpdb;
+		// Include ms_global and global tables.
+		foreach ( $wpdb->tables( 'ms_global' ) as $t ) {
+			$mock_physical[] = $t;
+		}
+		foreach ( $wpdb->tables( 'global' ) as $t ) {
+			$mock_physical[] = $t;
+		}
+		// Include blog tables for all 120 sites.
+		for ( $i = 1; $i <= 120; $i++ ) {
+			foreach ( $wpdb->tables( 'blog', true, $i ) as $t ) {
+				$mock_physical[] = $t;
+			}
+		}
+
+		$discovery = new SourceDiscoveryService( array( 'physical_tables' => $mock_physical ), $fetcher );
 		$preflight = new PreflightService( $discovery );
 		$planner   = new MigrationScopePlanner( $preflight, $discovery );
 
@@ -400,5 +427,155 @@ class MigrationScopePlannerIntegrationTest extends WP_UnitTestCase {
 		$global_names  = array_column( $global_tables, 'logical_name' );
 		$this->assertCount( 2, $global_names );
 		$this->assertSame( array_unique( $global_names ), $global_names );
+	}
+	/**
+	 * Test that full-network planning fails closed (status: blocked) when required core tables
+	 * for any network site or core ms_global are physically absent, marking them 'missing'.
+	 */
+	public function test_full_network_plan_fails_closed_when_physical_tables_are_missing() {
+		if ( ! is_multisite() ) {
+			$this->assertFalse( is_multisite() );
+			return;
+		}
+
+		$admin_id = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		grant_super_admin( $admin_id );
+		wp_set_current_user( $admin_id );
+
+		// Simulate 2 sites where site 2 does NOT have physical blog tables created in DB.
+		$simulated_sites = array(
+			array(
+				'blog_id'    => 1,
+				'network_id' => 1,
+				'domain'     => 'example.org',
+				'path'       => '/',
+				'archived'   => 0,
+				'spam'       => 0,
+				'deleted'    => 0,
+			),
+			array(
+				'blog_id'    => 9999, // Non-existent site with no physical tables in DB.
+				'network_id' => 1,
+				'domain'     => 'example.org',
+				'path'       => '/missing-site/',
+				'archived'   => 0,
+				'spam'       => 0,
+				'deleted'    => 0,
+			),
+		);
+
+		$fetcher = function ( $offset, $number, $network_id = 1 ) use ( $simulated_sites ) {
+			unset( $network_id );
+			return array_slice( $simulated_sites, $offset, $number );
+		};
+
+		$discovery = new SourceDiscoveryService( null, $fetcher );
+		$preflight = new PreflightService( $discovery );
+		$planner   = new MigrationScopePlanner( $preflight, $discovery );
+
+		$plan = $planner->plan( MigrationMode::FULL_NETWORK_TO_NEW_ENV );
+
+		// The plan must be fail-closed (status 'blocked') because site 9999 tables are physically absent.
+		$this->assertSame( 'blocked', $plan->get_status() );
+		$this->assertFalse( $plan->is_executable() );
+
+		// Check that blog tables for site 9999 are marked 'missing'.
+		$tables = $plan->get_tables();
+		$this->assertNotEmpty( $tables['blog'] );
+
+		$missing_found = false;
+		foreach ( $tables['blog'] as $t ) {
+			if ( false !== strpos( $t['table_name'], '9999' ) ) {
+				$this->assertSame( 'missing', $t['status'] );
+				$missing_found = true;
+			}
+		}
+		$this->assertTrue( $missing_found, 'Absent site tables must be classified as missing.' );
+	}
+
+	/**
+	 * Test that physically existing legacy core_old tables (such as sitecategories or categories)
+	 * are surfaced in the plan under 'unresolved' as 'needs_review' rather than silently omitted.
+	 */
+	public function test_physically_existing_core_old_tables_surfaced_in_plan() {
+		global $wpdb;
+
+		if ( ! is_multisite() ) {
+			$this->assertFalse( is_multisite() );
+			return;
+		}
+
+		$admin_id = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		grant_super_admin( $admin_id );
+		wp_set_current_user( $admin_id );
+
+		remove_filter( 'query', array( $this, '_create_temporary_tables' ) );
+		remove_filter( 'query', array( $this, '_drop_temporary_tables' ) );
+
+		$old_table = $wpdb->base_prefix . 'sitecategories';
+
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$wpdb->query( "CREATE TABLE IF NOT EXISTS `{$old_table}` (cat_id BIGINT PRIMARY KEY, cat_name VARCHAR(55))" );
+
+		try {
+			$planner = new MigrationScopePlanner();
+			$plan    = $planner->plan( MigrationMode::SUBSITE_TO_STANDALONE, 1 );
+
+			$tables = $plan->get_tables();
+			$this->assertNotEmpty( $tables['unresolved'] );
+
+			$unresolved_tables = array_column( $tables['unresolved'], 'table_name' );
+			$this->assertContains( $old_table, $unresolved_tables );
+
+			foreach ( $tables['unresolved'] as $entry ) {
+				if ( $entry['table_name'] === $old_table ) {
+					$this->assertSame( 'needs_review', $entry['status'] );
+					$this->assertSame( 'core_old', $entry['scope'] );
+				}
+			}
+		} finally {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			$wpdb->query( "DROP TABLE IF EXISTS `{$old_table}`" );
+			add_filter( 'query', array( $this, '_create_temporary_tables' ) );
+			add_filter( 'query', array( $this, '_drop_temporary_tables' ) );
+		}
+	}
+
+	/**
+	 * Test that MU-plugins and per-site dependencies are discovered and included in plan.
+	 */
+	public function test_mu_plugins_and_per_site_dependencies_in_plan() {
+		if ( ! is_multisite() ) {
+			$this->assertFalse( is_multisite() );
+			return;
+		}
+
+		$admin_id = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		grant_super_admin( $admin_id );
+		wp_set_current_user( $admin_id );
+
+		$subsite_id = self::factory()->blog->create();
+
+		// Set child theme and a plugin on subsite.
+		switch_to_blog( $subsite_id );
+		update_option( 'stylesheet', 'twentytwentyfour-child' );
+		update_option( 'template', 'twentytwentyfour' );
+		update_option( 'active_plugins', array( 'site-specific-plugin/site-specific.php' ) );
+		restore_current_blog();
+
+		$planner = new MigrationScopePlanner();
+		$plan    = $planner->plan( MigrationMode::FULL_NETWORK_TO_NEW_ENV );
+
+		try {
+			$deps = $plan->get_dependencies();
+			$this->assertArrayHasKey( 'mu_plugins', $deps );
+			$this->assertArrayHasKey( 'per_site', $deps );
+			$this->assertArrayHasKey( $subsite_id, $deps['per_site'] );
+			$this->assertSame( 'twentytwentyfour-child', $deps['per_site'][ $subsite_id ]['theme']['stylesheet'] );
+			$this->assertTrue( $deps['per_site'][ $subsite_id ]['theme']['is_child'] );
+			$this->assertContains( 'site-specific-plugin/site-specific.php', $deps['per_site'][ $subsite_id ]['plugins'] );
+		} finally {
+			wp_delete_site( $subsite_id );
+		}
 	}
 }

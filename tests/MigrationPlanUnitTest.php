@@ -316,4 +316,92 @@ class MigrationPlanUnitTest extends TestCase {
 
 		$this->assertSame( $json1, $json2, 'Plan JSON output must be completely deterministic.' );
 	}
+	/**
+	 * Test that MigrationPlan accepts and outputs mu_plugins and per-site dependencies in its contract.
+	 */
+	public function test_migration_plan_contract_includes_mu_plugins_and_per_site_dependencies() {
+		$preflight_report = new PreflightReport(
+			MigrationMode::FULL_NETWORK_TO_NEW_ENV,
+			null,
+			PreflightReport::STATUS_SOURCE_INSPECTED,
+			false,
+			array(
+				'expected_type'       => 'multisite_network',
+				'verification_status' => 'unverified',
+			),
+			array(),
+			array()
+		);
+
+		$dependencies = array(
+			'themes'     => array(
+				array(
+					'slug'   => 'twentytwentyfour',
+					'status' => 'review_required',
+					'parent' => null,
+				),
+			),
+			'plugins'    => array(
+				array(
+					'slug'     => 'siteconvoy-test-sitewide/siteconvoy-test-sitewide.php',
+					'sitewide' => true,
+					'status'   => 'review_required',
+				),
+			),
+			'mu_plugins' => array(
+				array(
+					'filename' => 'security-check.php',
+					'status'   => 'review_required',
+				),
+			),
+			'dropins'    => array(
+				array(
+					'filename' => 'object-cache.php',
+					'status'   => 'review_required',
+				),
+			),
+			'media'      => array(
+				'layout'             => 'sites_id',
+				'offload_indicators' => array(),
+			),
+			'per_site'   => array(
+				2 => array(
+					'theme'   => array(
+						'stylesheet' => 'twentytwentyfour-child',
+						'template'   => 'twentytwentyfour',
+						'is_child'   => true,
+					),
+					'plugins' => array( 'site-specific-plugin/site-specific.php' ),
+				),
+			),
+		);
+
+		$plan = new MigrationPlan(
+			MigrationMode::FULL_NETWORK_TO_NEW_ENV,
+			null,
+			'needs_review',
+			array(
+				'blog'       => array(),
+				'global'     => array(),
+				'ms_global'  => array(),
+				'unresolved' => array(),
+			),
+			$dependencies,
+			$preflight_report,
+			array(
+				'is_multisite'       => true,
+				'current_network_id' => 1,
+				'base_prefix'        => 'wp_',
+				'site_count'         => 2,
+			)
+		);
+
+		$deps = $plan->get_dependencies();
+		$this->assertArrayHasKey( 'mu_plugins', $deps );
+		$this->assertCount( 1, $deps['mu_plugins'] );
+		$this->assertSame( 'security-check.php', $deps['mu_plugins'][0]['filename'] );
+		$this->assertArrayHasKey( 'per_site', $deps );
+		$this->assertArrayHasKey( 2, $deps['per_site'] );
+		$this->assertTrue( $deps['per_site'][2]['theme']['is_child'] );
+	}
 }
