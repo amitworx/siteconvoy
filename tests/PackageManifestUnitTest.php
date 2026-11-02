@@ -437,7 +437,7 @@ class PackageManifestUnitTest extends TestCase {
 			PackageManifest::from_array( $unsupported_version );
 			$this->fail( 'Expected InvalidArgumentException for unsupported format_version.' );
 		} catch ( \InvalidArgumentException $e ) {
-			$this->assertStringContainsString( 'Unsupported format_version "2.0"', $e->getMessage() );
+			$this->assertStringContainsString( 'Unsupported format_version in manifest', $e->getMessage() );
 		}
 
 		// Extraneous top-level key rejected.
@@ -447,7 +447,7 @@ class PackageManifestUnitTest extends TestCase {
 			PackageManifest::from_array( $extra_top );
 			$this->fail( 'Expected InvalidArgumentException for extra top-level key.' );
 		} catch ( \InvalidArgumentException $e ) {
-			$this->assertStringContainsString( 'Unexpected top-level property "extra_field"', $e->getMessage() );
+			$this->assertStringContainsString( 'Unexpected top-level property in manifest', $e->getMessage() );
 		}
 	}
 
@@ -618,7 +618,18 @@ class PackageManifestUnitTest extends TestCase {
 		$res_invalid_utf8 = PackageManifestValidator::validate_path( $invalid_utf8 );
 		$this->assertFalse( $res_invalid_utf8['valid'], 'Invalid UTF-8 byte sequence must be rejected.' );
 
-		// 3. Unicode case-fold collision rejection in PackageManifest.
+		// 3. Decomposed Unicode characters (combining marks / NFD) are rejected.
+		// "e" followed by combining acute accent U+0301 (decomposed café).
+		$decomposed_path = "uploads/cafe\xCC\x81.png";
+		$res_decomposed  = PackageManifestValidator::validate_path( $decomposed_path );
+		$this->assertFalse( $res_decomposed['valid'], 'Decomposed Unicode combining mark sequences must be rejected.' );
+
+		// Composed form (U+00E9) is accepted.
+		$composed_path = "uploads/caf\xC3\xA9.png";
+		$res_composed  = PackageManifestValidator::validate_path( $composed_path );
+		$this->assertTrue( $res_composed['valid'], 'Precomposed Unicode characters must be accepted.' );
+
+		// 4. Unicode case-fold collision rejection in PackageManifest.
 		$source                    = array(
 			'is_multisite' => false,
 			'site_id'      => 1,
@@ -638,8 +649,103 @@ class PackageManifestUnitTest extends TestCase {
 			),
 		);
 		$this->expectException( \InvalidArgumentException::class );
-		$this->expectExceptionMessage( 'Case-collision duplicate entry path' );
+		$this->expectExceptionMessage( 'Case-collision duplicate entry path detected.' );
 		new PackageManifest( MigrationMode::STANDALONE_TO_SUBSITE, $source, $unicode_collision_entries );
+	}
+
+	/**
+	 * Test exception and error sanitization to prevent sensitive input leakage.
+	 */
+	public function test_exceptions_and_errors_do_not_leak_untrusted_input() {
+		$secret_sentinel = 'super_secret_customer_token_999';
+
+		// 1. Malicious top-level property in from_array().
+		$raw_with_secret_prop = array(
+			'format_version' => '1.0',
+			'mode'           => MigrationMode::STANDALONE_TO_SUBSITE,
+			'source'         => array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+			),
+			'entries'        => array(),
+			$secret_sentinel => 'hostile_value',
+		);
+		try {
+			PackageManifest::from_array( $raw_with_secret_prop );
+			$this->fail( 'Expected exception for extra top-level property.' );
+		} catch ( \InvalidArgumentException $e ) {
+			$this->assertStringNotContainsString( $secret_sentinel, $e->getMessage() );
+		}
+
+		// 2. Malicious format_version in from_array().
+		$raw_with_secret_version = array(
+			'format_version' => '2.0_' . $secret_sentinel,
+			'mode'           => MigrationMode::STANDALONE_TO_SUBSITE,
+			'source'         => array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+			),
+			'entries'        => array(),
+		);
+		try {
+			PackageManifest::from_array( $raw_with_secret_version );
+			$this->fail( 'Expected exception for unsupported format_version.' );
+		} catch ( \InvalidArgumentException $e ) {
+			$this->assertStringNotContainsString( $secret_sentinel, $e->getMessage() );
+		}
+
+		// 3. Extraneous entry key containing secret in validate_entry().
+		$entry_with_secret_key = array(
+			'path'           => 'database/schema.sql',
+			'size'           => 10,
+			'sha256'         => hash( 'sha256', 'test' ),
+			$secret_sentinel => 'leaked_data',
+		);
+		$res_entry_key         = PackageManifestValidator::validate_entry( $entry_with_secret_key );
+		$this->assertFalse( $res_entry_key['valid'] );
+		$this->assertStringNotContainsString( $secret_sentinel, $res_entry_key['error'] );
+
+		// 4. Non-regular entry type containing secret in validate_entry().
+		$entry_with_secret_type = array(
+			'path'   => 'database/schema.sql',
+			'size'   => 10,
+			'sha256' => hash( 'sha256', 'test' ),
+			'type'   => 'symlink_' . $secret_sentinel,
+		);
+		$res_entry_type         = PackageManifestValidator::validate_entry( $entry_with_secret_type );
+		$this->assertFalse( $res_entry_type['valid'] );
+		$this->assertStringNotContainsString( $secret_sentinel, $res_entry_type['error'] );
+
+		// 5. Unapproved root prefix containing secret in validate_path().
+		$res_root = PackageManifestValidator::validate_path( 'secret_root_' . $secret_sentinel . '/dump.sql' );
+		$this->assertFalse( $res_root['valid'] );
+		$this->assertStringNotContainsString( $secret_sentinel, $res_root['error'] );
+
+		// 6. Duplicate path containing secret in PackageManifest constructor.
+		$source                   = array(
+			'is_multisite' => false,
+			'site_id'      => 1,
+			'base_prefix'  => 'wp_',
+		);
+		$secret_path              = 'database/dump_' . $secret_sentinel . '.sql';
+		$duplicate_secret_entries = array(
+			array(
+				'path'   => $secret_path,
+				'size'   => 5,
+				'sha256' => hash( 'sha256', 'a' ),
+			),
+			array(
+				'path'   => $secret_path,
+				'size'   => 5,
+				'sha256' => hash( 'sha256', 'b' ),
+			),
+		);
+		try {
+			new PackageManifest( MigrationMode::STANDALONE_TO_SUBSITE, $source, $duplicate_secret_entries );
+			$this->fail( 'Expected exception for duplicate entry path.' );
+		} catch ( \InvalidArgumentException $e ) {
+			$this->assertStringNotContainsString( $secret_sentinel, $e->getMessage() );
+		}
 	}
 
 	/**

@@ -108,6 +108,24 @@ class PackageManifestValidator {
 			);
 		}
 
+		// Enforce Unicode canonical composition (NFC) and reject decomposed combining marks (NFD).
+		// In pure PHP without intl, decomposed sequences contain Unicode combining mark category \p{M}.
+		// If intl is present, normalizer_is_normalized() confirms NFC form.
+		if ( function_exists( 'normalizer_is_normalized' ) && defined( 'Normalizer::FORM_C' ) ) {
+			if ( ! normalizer_is_normalized( $path, \Normalizer::FORM_C ) ) {
+				return array(
+					'valid' => false,
+					'error' => 'Path must be in Unicode Normalization Form C (precomposed).',
+				);
+			}
+		}
+		if ( 1 === preg_match( '/\p{M}/u', $path ) ) {
+			return array(
+				'valid' => false,
+				'error' => 'Path must not contain decomposed Unicode combining marks.',
+			);
+		}
+
 		// Reject null bytes and ASCII control characters.
 		if ( preg_match( '/[\x00-\x1F\x7F]/', $path ) ) {
 			return array(
@@ -232,7 +250,7 @@ class PackageManifestValidator {
 		if ( ! in_array( $root, self::APPROVED_ROOTS, true ) ) {
 			return array(
 				'valid' => false,
-				'error' => sprintf( 'Unapproved root prefix "%s". Allowed roots: %s.', $root, implode( ', ', self::APPROVED_ROOTS ) ),
+				'error' => 'Unapproved root prefix in path. Allowed roots: database, uploads, assets.',
 			);
 		}
 
@@ -255,7 +273,7 @@ class PackageManifestValidator {
 			if ( ! in_array( $key, $allowed_keys, true ) ) {
 				return array(
 					'valid' => false,
-					'error' => sprintf( 'Extraneous entry key "%s" is prohibited.', $key ),
+					'error' => 'Extraneous entry key is prohibited in manifest entry.',
 				);
 			}
 		}
@@ -291,7 +309,7 @@ class PackageManifestValidator {
 			if ( 'regular' !== $entry['type'] ) {
 				return array(
 					'valid' => false,
-					'error' => sprintf( 'Non-regular entry type "%s" is prohibited. Only "regular" files allowed.', $entry['type'] ),
+					'error' => 'Non-regular entry type is prohibited. Only "regular" files allowed.',
 				);
 			}
 		}

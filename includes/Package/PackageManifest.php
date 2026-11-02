@@ -83,13 +83,11 @@ class PackageManifest implements JsonSerializable {
 			}
 
 			if ( isset( $seen_paths[ $path ] ) ) {
-				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped
-				throw new InvalidArgumentException( sprintf( 'Duplicate entry path "%s".', $path ) );
+				throw new InvalidArgumentException( 'Duplicate entry path detected in manifest.' );
 			}
 
 			if ( isset( $seen_lower_paths[ $lower_path ] ) ) {
-				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped
-				throw new InvalidArgumentException( sprintf( 'Case-collision duplicate entry path "%s" vs "%s".', $path, $seen_lower_paths[ $lower_path ] ) );
+				throw new InvalidArgumentException( 'Case-collision duplicate entry path detected.' );
 			}
 
 			$seen_paths[ $path ]             = true;
@@ -239,8 +237,7 @@ class PackageManifest implements JsonSerializable {
 		$allowed_top_keys = array( 'format_version', 'mode', 'source', 'entries' );
 		foreach ( array_keys( $data ) as $key ) {
 			if ( ! in_array( $key, $allowed_top_keys, true ) ) {
-				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped
-				throw new InvalidArgumentException( sprintf( 'Unexpected top-level property "%s" in manifest.', $key ) );
+				throw new InvalidArgumentException( 'Unexpected top-level property in manifest.' );
 			}
 		}
 
@@ -252,8 +249,7 @@ class PackageManifest implements JsonSerializable {
 		}
 
 		if ( ! is_string( $data['format_version'] ) || self::FORMAT_VERSION !== $data['format_version'] ) {
-			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped
-			throw new InvalidArgumentException( sprintf( 'Unsupported format_version "%s". Only version "%s" is supported.', is_scalar( $data['format_version'] ) ? (string) $data['format_version'] : gettype( $data['format_version'] ), self::FORMAT_VERSION ) );
+			throw new InvalidArgumentException( 'Unsupported format_version in manifest. Only version 1.0 is supported.' );
 		}
 
 		if ( ! is_string( $data['mode'] ) ) {
