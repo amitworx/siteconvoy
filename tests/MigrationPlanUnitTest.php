@@ -222,7 +222,8 @@ class MigrationPlanUnitTest extends TestCase {
 
 		$this->assertSame( 'unauthorized', $plan->get_status() );
 		$this->assertFalse( $plan->is_executable() );
-		$this->assertEmpty( $plan->to_array()['tables'] );
+		$tables = (array) $plan->to_array()['tables'];
+		$this->assertEmpty( $tables );
 	}
 
 	/**
@@ -513,9 +514,9 @@ class MigrationPlanUnitTest extends TestCase {
 			array()
 		);
 
-		// 3. Blocked Plan (Missing tables).
-		$finding_blocked = new PreflightFinding( 'SC_MISSING_CORE_TABLES_PLAN', PreflightFinding::SEVERITY_BLOCKER, 'Missing tables.' );
-		$preflight3      = new PreflightReport(
+		// 3. Early Blocked Plan (Blocked preflight before inventory, e.g. multi-network or unsupported environment).
+		$finding_early_blocked = new PreflightFinding( 'SC_MULTI_NETWORK_UNSUPPORTED', PreflightFinding::SEVERITY_BLOCKER, 'Multi-network installation is not supported.' );
+		$preflight3            = new PreflightReport(
 			MigrationMode::FULL_NETWORK_TO_NEW_ENV,
 			null,
 			PreflightReport::STATUS_BLOCKED,
@@ -524,10 +525,10 @@ class MigrationPlanUnitTest extends TestCase {
 				'expected_type'       => 'multisite_network',
 				'verification_status' => 'unverified',
 			),
-			array(),
-			array( $finding_blocked )
+			null,
+			array( $finding_early_blocked )
 		);
-		$plan3           = new MigrationPlan(
+		$plan3                 = new MigrationPlan(
 			MigrationMode::FULL_NETWORK_TO_NEW_ENV,
 			null,
 			'blocked',
@@ -548,6 +549,44 @@ class MigrationPlanUnitTest extends TestCase {
 				),
 			),
 			$preflight3,
+			array()
+		);
+
+		// 4. Post-Planning Blocked Plan (Missing tables).
+		$finding_blocked = new PreflightFinding( 'SC_MISSING_CORE_TABLES_PLAN', PreflightFinding::SEVERITY_BLOCKER, 'Missing tables.' );
+		$preflight4      = new PreflightReport(
+			MigrationMode::FULL_NETWORK_TO_NEW_ENV,
+			null,
+			PreflightReport::STATUS_BLOCKED,
+			false,
+			array(
+				'expected_type'       => 'multisite_network',
+				'verification_status' => 'unverified',
+			),
+			array(),
+			array( $finding_blocked )
+		);
+		$plan4           = new MigrationPlan(
+			MigrationMode::FULL_NETWORK_TO_NEW_ENV,
+			null,
+			'blocked',
+			array(
+				'blog'       => array(),
+				'global'     => array(),
+				'ms_global'  => array(),
+				'unresolved' => array(),
+			),
+			array(
+				'themes'     => array(),
+				'plugins'    => array(),
+				'mu_plugins' => array(),
+				'dropins'    => array(),
+				'media'      => array(
+					'layout'             => 'standard',
+					'offload_indicators' => array(),
+				),
+			),
+			$preflight4,
 			array(
 				'is_multisite'       => true,
 				'current_network_id' => 1,
@@ -556,28 +595,19 @@ class MigrationPlanUnitTest extends TestCase {
 			)
 		);
 
-		$test_plans = array( $plan1, $plan2, $plan3 );
+		$test_plans = array( $plan1, $plan2, $plan3, $plan4 );
 
 		foreach ( $test_plans as $idx => $p ) {
-			$arr = $p->to_array();
+			$json_str = (string) wp_json_encode( $p );
+			$this->assertNotFalse( $json_str );
+			$decoded = json_decode( $json_str, true );
+			$this->assertIsArray( $decoded );
 
-			// All required fields present.
-			foreach ( $required_root as $req_field ) {
-				$this->assertArrayHasKey( $req_field, $arr, "Missing root field {$req_field} in plan {$idx}." );
-			}
-
-			// Validate schema version and non-executable invariant.
-			$this->assertSame( '1.0.0', $arr['schema_version'] );
-			$this->assertFalse( $arr['is_executable'] );
-			$this->assertContains( $arr['mode'], $schema['properties']['mode']['enum'] );
-			$this->assertContains( $arr['status'], $schema['properties']['status']['enum'] );
-			$this->assertIsArray( $arr['source_topology'] );
-			$this->assertIsArray( $arr['tables'] );
-			$this->assertIsArray( $arr['dependencies'] );
-			$this->assertIsArray( $arr['outstanding_verifications'] );
+			// Strict recursive schema validation.
+			$errors = JsonSchemaValidator::validate( $decoded, $schema );
+			$this->assertEmpty( $errors, sprintf( "Plan index %d failed JSON schema validation:\n%s", $idx, implode( "\n", $errors ) ) );
 
 			// Check no sensitive credential patterns leak in serialized JSON.
-			$json_str = (string) wp_json_encode( $arr );
 			$this->assertStringNotContainsString( 'db_password', $json_str );
 			$this->assertStringNotContainsString( 'user_pass', $json_str );
 			$this->assertStringNotContainsString( 'NONCE_KEY', $json_str );

@@ -98,7 +98,10 @@ class MigrationScopePlanner {
 					'plugins'    => array(),
 					'mu_plugins' => array(),
 					'dropins'    => array(),
-					'media'      => array(),
+					'media'      => array(
+						'layout'             => 'standard',
+						'offload_indicators' => array(),
+					),
 				),
 				$report,
 				array()
@@ -122,7 +125,10 @@ class MigrationScopePlanner {
 					'plugins'    => array(),
 					'mu_plugins' => array(),
 					'dropins'    => array(),
-					'media'      => array(),
+					'media'      => array(
+						'layout'             => 'standard',
+						'offload_indicators' => array(),
+					),
 				),
 				$report,
 				array()

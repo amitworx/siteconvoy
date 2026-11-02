@@ -49,12 +49,6 @@
     },
     "source_topology": {
       "type": "object",
-      "required": [
-        "is_multisite",
-        "current_network_id",
-        "base_prefix",
-        "site_count"
-      ],
       "properties": {
         "is_multisite": { "type": "boolean" },
         "current_network_id": { "type": "integer" },
@@ -65,12 +59,6 @@
     },
     "tables": {
       "type": "object",
-      "required": [
-        "blog",
-        "global",
-        "ms_global",
-        "unresolved"
-      ],
       "properties": {
         "blog": {
           "type": "array",
@@ -104,13 +92,6 @@
     },
     "dependencies": {
       "type": "object",
-      "required": [
-        "themes",
-        "plugins",
-        "mu_plugins",
-        "dropins",
-        "media"
-      ],
       "properties": {
         "themes": {
           "type": "array",
@@ -171,5 +152,47 @@
         "findings": { "type": "array" }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": { "const": "needs_review" }
+        }
+      },
+      "then": {
+        "properties": {
+          "source_topology": {
+            "required": ["is_multisite", "current_network_id", "base_prefix", "site_count"]
+          },
+          "tables": {
+            "required": ["blog", "global", "ms_global", "unresolved"]
+          },
+          "dependencies": {
+            "required": ["themes", "plugins", "mu_plugins", "dropins", "media"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": { "const": "unauthorized" }
+        }
+      },
+      "then": {
+        "properties": {
+          "source_topology": {
+            "maxProperties": 0
+          },
+          "tables": {
+            "maxProperties": 0
+          },
+          "dependencies": {
+            "maxProperties": 0
+          }
+        }
+      }
+    }
+  ]
 }

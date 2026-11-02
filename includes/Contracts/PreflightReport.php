@@ -243,7 +243,7 @@ class PreflightReport implements \JsonSerializable {
 			'source_site_id'            => $this->source_site_id,
 			'status'                    => $this->status,
 			'can_proceed_to_next_stage' => $this->can_proceed_to_next_stage,
-			'target_expectations'       => $this->target_expectations,
+			'target_expectations'       => ! empty( $this->target_expectations ) ? $this->target_expectations : (object) array(),
 			'counts'                    => $this->counts,
 			'findings'                  => $serialized_findings,
 			'source_inventory'          => $this->source_inventory,

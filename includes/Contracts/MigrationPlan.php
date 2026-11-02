@@ -231,9 +231,9 @@ class MigrationPlan implements \JsonSerializable {
 			'source_site_id'            => $this->source_site_id,
 			'status'                    => $this->status,
 			'is_executable'             => false,
-			'source_topology'           => $this->source_topology,
-			'tables'                    => $this->tables,
-			'dependencies'              => $this->dependencies,
+			'source_topology'           => ! empty( $this->source_topology ) ? $this->source_topology : (object) array(),
+			'tables'                    => ! empty( $this->tables ) ? $this->tables : (object) array(),
+			'dependencies'              => ! empty( $this->dependencies ) ? $this->dependencies : (object) array(),
 			'outstanding_verifications' => $this->get_outstanding_verifications(),
 			'preflight'                 => $this->preflight_report ? $this->preflight_report->to_array() : null,
 		);

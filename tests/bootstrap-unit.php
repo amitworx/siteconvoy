@@ -12,6 +12,8 @@ if ( file_exists( dirname( __DIR__ ) . '/vendor/autoload.php' ) ) {
 	require_once dirname( __DIR__ ) . '/vendor/autoload.php';
 }
 
+require_once __DIR__ . '/JsonSchemaValidator.php';
+
 if ( ! function_exists( 'plugin_dir_path' ) ) {
 	/**
 	 * Minimal stub for plugin_dir_path() during standalone unit tests.

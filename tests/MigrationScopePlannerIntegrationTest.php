@@ -33,7 +33,7 @@ class MigrationScopePlannerIntegrationTest extends WP_UnitTestCase {
 		$anon_plan = $planner->plan( $mode, $site_id );
 		$this->assertSame( 'unauthorized', $anon_plan->get_status() );
 		$this->assertFalse( $anon_plan->is_executable() );
-		$this->assertEmpty( $anon_plan->to_array()['tables'] );
+		$this->assertEmpty( (array) $anon_plan->to_array()['tables'] );
 
 		// 2. Subscriber.
 		$subscriber_id = self::factory()->user->create( array( 'role' => 'subscriber' ) );

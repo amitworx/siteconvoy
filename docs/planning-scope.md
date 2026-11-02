@@ -18,7 +18,7 @@ The `SITECONVOY-M1-003` planning subsystem extends the read-only discovery found
 
 ```mermaid
 flowchart TD
-    Caller["Caller / Future WP-CLI / REST (Milestone M2+)"] -->|generate_plan| Planner["MigrationScopePlanner"]
+    Caller["Caller / Future WP-CLI / REST (Milestone M2+)"] -->|plan| Planner["MigrationScopePlanner"]
     Planner -->|PreflightService::run| Preflight["PreflightService (Capability & Topology Gate)"]
     Preflight -->|deny| BlockedPlan["MigrationPlan (status: blocked / unauthorized, is_executable: false)"]
     Preflight -->|pass| Discovery["SourceDiscoveryService (Read-Only DB / WP-Context)"]
@@ -34,21 +34,21 @@ flowchart TD
 ## 2. Invariants & Security Boundaries
 
 1. **Deterministic & Read-Only**:
-   - `MigrationScopePlanner::generate_plan()` produces bit-identical plans across repeated runs on unchanged source databases.
+   - `MigrationScopePlanner::plan()` produces bit-identical plans across repeated runs on unchanged source databases.
    - It executes no write queries, creates no database locks, provisions no files, and modifies no options or transients.
 2. **Fail-Closed Execution Guard (`is_executable === false`)**:
    - `MigrationPlan::is_executable()` unconditionally returns `false`.
    - The serialized JSON plan explicitly contains `"is_executable": false`.
    - Any plan with blocking preflight findings or missing prerequisites is created with `status: "blocked"` or `status: "unauthorized"`.
 3. **Authorization & Defense-in-Depth**:
-   - `MigrationScopePlanner::generate_plan()` invokes `PreflightService::run()`, requiring `manage_network` on multisite installations and `manage_options` on standalone installations.
-   - Unauthorized attempts return a plan with `status: "unauthorized"`, an empty table manifest, and a blocking preflight finding `SC_AUTH_FORBIDDEN`.
+   - `MigrationScopePlanner::plan()` invokes `PreflightService::run()`, requiring `manage_network` on multisite installations and `manage_options` on standalone installations.
+   - Unauthorized attempts return a plan with `status: "unauthorized"`, an empty table manifest (serialized as `{}`), empty source topology (`{}`), and a blocking preflight finding `SC_AUTH_FORBIDDEN`. No topology, table names, or credentials leak.
 4. **Current-Network Ownership & Isolation**:
    - `SourceDiscoveryService::enumerate_network_sites()` strictly validates any provided `$network_id`. Querying a foreign network ID throws `\InvalidArgumentException`.
    - In `MigrationScopePlanner`, site existence and current-network ownership are strictly checked against `get_site( $site_id )` and `(int) $site->site_id === (int) $wpdb->siteid`.
 5. **Data Minimization & Zero Sensitive Data**:
    - Plans omit database passwords, salts, keys, user emails, password hashes, and user login names.
-   - Dependency discovery reads only metadata (plugin names, version headers, theme text domain, and active option keys).
+   - Dependency discovery reads only shallow metadata (plugin relative slugs, theme stylesheet/template slugs, drop-in/mu-plugin filenames, and active option keys). No file headers or plugin version/name metadata are parsed.
 
 ---
 
@@ -177,31 +177,33 @@ The canonical JSON Schema is located in [`schemas/migration-plan.json`](../schem
     },
     "source_topology": {
       "type": "object",
-      "required": [
-        "is_multisite",
-        "current_network_id",
-        "base_prefix",
-        "site_count"
-      ]
+      "properties": {
+        "is_multisite": { "type": "boolean" },
+        "current_network_id": { "type": "integer" },
+        "base_prefix": { "type": "string" },
+        "site_count": { "type": "integer" },
+        "network_sites": { "type": "array" }
+      }
     },
     "tables": {
       "type": "object",
-      "required": [
-        "blog",
-        "global",
-        "ms_global",
-        "unresolved"
-      ]
+      "properties": {
+        "blog": { "type": "array" },
+        "global": { "type": "array" },
+        "ms_global": { "type": "array" },
+        "unresolved": { "type": "array" }
+      }
     },
     "dependencies": {
       "type": "object",
-      "required": [
-        "themes",
-        "plugins",
-        "mu_plugins",
-        "dropins",
-        "media"
-      ]
+      "properties": {
+        "themes": { "type": "array" },
+        "plugins": { "type": "array" },
+        "mu_plugins": { "type": "array" },
+        "dropins": { "type": "array" },
+        "media": { "type": "object" },
+        "per_site": { "type": "object" }
+      }
     },
     "outstanding_verifications": {
       "type": "array",
@@ -215,6 +217,28 @@ The canonical JSON Schema is located in [`schemas/migration-plan.json`](../schem
         "null"
       ]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "needs_review" } } },
+      "then": {
+        "properties": {
+          "source_topology": { "required": ["is_multisite", "current_network_id", "base_prefix", "site_count"] },
+          "tables": { "required": ["blog", "global", "ms_global", "unresolved"] },
+          "dependencies": { "required": ["themes", "plugins", "mu_plugins", "dropins", "media"] }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "unauthorized" } } },
+      "then": {
+        "properties": {
+          "source_topology": { "maxProperties": 0 },
+          "tables": { "maxProperties": 0 },
+          "dependencies": { "maxProperties": 0 }
+        }
+      }
+    }
+  ]
 }
 ```
