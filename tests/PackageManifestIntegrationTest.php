@@ -177,12 +177,18 @@ class PackageManifestIntegrationTest extends WP_UnitTestCase {
 		$this->assertSame( 1, $result->get_member_count() );
 
 		// Clean up files.
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_unlink
-		@unlink( $destination_zip );
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
-		@rmdir( $staging_dir );
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
-		@rmdir( $temp_dir );
+		if ( file_exists( $destination_zip ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_unlink, WordPress.WP.AlternativeFunctions.unlink_unlink
+			unlink( $destination_zip );
+		}
+		if ( is_dir( $staging_dir ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
+			rmdir( $staging_dir );
+		}
+		if ( is_dir( $temp_dir ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
+			rmdir( $temp_dir );
+		}
 
 		// Assert zero database modifications.
 		$final_options_count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->options}" );

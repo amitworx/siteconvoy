@@ -100,6 +100,7 @@ class PackageArchiveWriter {
 
 		// Check output parent directory.
 		$output_dir = dirname( $output_path );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_is_writable
 		if ( ! is_dir( $output_dir ) || ! is_writable( $output_dir ) ) {
 			if ( $close_streams ) {
 				$this->close_stream_map( $stream_map );
@@ -156,6 +157,7 @@ class PackageArchiveWriter {
 			}
 		}
 
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_is_writable
 		if ( ! is_writable( $staging_dir ) ) {
 			if ( $close_streams ) {
 				$this->close_stream_map( $stream_map );
@@ -330,7 +332,8 @@ class PackageArchiveWriter {
 			}
 
 			// 7. Atomic publication (rename within same filesystem).
-			if ( ! @rename( $temp_archive_path, $output_path ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename
+			if ( ! rename( $temp_archive_path, $output_path ) ) {
 				// Fallback to copy + unlink if cross-device rename or Windows atomic rename fails.
 				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_copy
 				if ( ! copy( $temp_archive_path, $output_path ) ) {
@@ -339,8 +342,10 @@ class PackageArchiveWriter {
 						'Failed to publish finalized archive to destination location.'
 					);
 				}
-				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_unlink, WordPress.WP.AlternativeFunctions.unlink_unlink
-				@unlink( $temp_archive_path );
+				if ( file_exists( $temp_archive_path ) ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_unlink, WordPress.WP.AlternativeFunctions.unlink_unlink
+					unlink( $temp_archive_path );
+				}
 			}
 
 			$archive_size   = (int) filesize( $output_path );
@@ -362,12 +367,12 @@ class PackageArchiveWriter {
 			foreach ( $staged_files as $staged_file ) {
 				if ( file_exists( $staged_file ) ) {
 					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_unlink, WordPress.WP.AlternativeFunctions.unlink_unlink
-					@unlink( $staged_file );
+					unlink( $staged_file );
 				}
 			}
 			if ( file_exists( $temp_archive_path ) ) {
 				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_unlink, WordPress.WP.AlternativeFunctions.unlink_unlink
-				@unlink( $temp_archive_path );
+				unlink( $temp_archive_path );
 			}
 			$this->clean_dir( $staging_dir );
 		}
@@ -630,7 +635,7 @@ class PackageArchiveWriter {
 		foreach ( $stream_map as $stream ) {
 			if ( is_resource( $stream ) ) {
 				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-				@fclose( $stream );
+				fclose( $stream );
 			}
 		}
 	}
@@ -644,7 +649,8 @@ class PackageArchiveWriter {
 		if ( ! is_dir( $dir ) ) {
 			return;
 		}
-		$items = @scandir( $dir );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_scandir
+		$items = scandir( $dir );
 		if ( false !== $items ) {
 			foreach ( $items as $item ) {
 				if ( '.' === $item || '..' === $item ) {
@@ -653,14 +659,14 @@ class PackageArchiveWriter {
 				$path = $dir . DIRECTORY_SEPARATOR . $item;
 				if ( is_dir( $path ) ) {
 					$this->clean_dir( $path );
-				} else {
+				} elseif ( file_exists( $path ) ) {
 					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_unlink, WordPress.WP.AlternativeFunctions.unlink_unlink
-					@unlink( $path );
+					unlink( $path );
 				}
 			}
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
-		@rmdir( $dir );
+		rmdir( $dir );
 	}
 
 	/**
