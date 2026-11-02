@@ -93,6 +93,21 @@ class PackageManifestValidator {
 			);
 		}
 
+		// Enforce valid UTF-8 encoding.
+		if ( function_exists( 'mb_check_encoding' ) ) {
+			if ( ! mb_check_encoding( $path, 'UTF-8' ) ) {
+				return array(
+					'valid' => false,
+					'error' => 'Path must be a valid UTF-8 string.',
+				);
+			}
+		} elseif ( false === preg_match( '//u', $path ) ) {
+			return array(
+				'valid' => false,
+				'error' => 'Path must be a valid UTF-8 string.',
+			);
+		}
+
 		// Reject null bytes and ASCII control characters.
 		if ( preg_match( '/[\x00-\x1F\x7F]/', $path ) ) {
 			return array(

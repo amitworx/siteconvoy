@@ -111,13 +111,45 @@ class PackageStreamVerifier {
 					continue;
 				}
 
-				// Validate stream wrapper: prohibit network, non-local, or unreadable streams.
+				// Validate stream wrapper and readability: enforce strict local allowlist.
 				$meta = stream_get_meta_data( $stream );
-				if ( isset( $meta['wrapper_type'] ) && 'http' === strtolower( substr( $meta['wrapper_type'], 0, 4 ) ) ) {
+
+				// Validate readability mode (must contain 'r' or '+').
+				$mode = isset( $meta['mode'] ) ? (string) $meta['mode'] : '';
+				if ( ! str_contains( $mode, 'r' ) && ! str_contains( $mode, '+' ) ) {
+					$errors[] = array(
+						'code'    => 'UNREADABLE_STREAM',
+						'path'    => $path,
+						'message' => sprintf( 'Stream for "%s" is not opened in a readable mode.', $path ),
+					);
+					continue;
+				}
+
+				// Check safe stream wrapper allowlist.
+				$wrapper_type = isset( $meta['wrapper_type'] ) ? strtolower( (string) $meta['wrapper_type'] ) : '';
+				$stream_type  = isset( $meta['stream_type'] ) ? strtoupper( (string) $meta['stream_type'] ) : '';
+				$uri          = isset( $meta['uri'] ) ? (string) $meta['uri'] : '';
+
+				$is_safe_stream = false;
+
+				// 1. Plain local file (plainfile / STDIO).
+				if ( 'plainfile' === $wrapper_type && 'STDIO' === $stream_type ) {
+					$is_safe_stream = true;
+				}
+
+				// 2. PHP memory or temp streams (wrapper_type PHP, stream_type TEMP or MEMORY, uri php://temp or php://memory).
+				if ( 'php' === $wrapper_type && in_array( $stream_type, array( 'TEMP', 'MEMORY' ), true ) ) {
+					// Strictly prohibit php://filter even if PHP wrapper metadata is reported.
+					if ( ! str_starts_with( $uri, 'php://filter' ) ) {
+						$is_safe_stream = true;
+					}
+				}
+
+				if ( ! $is_safe_stream ) {
 					$errors[] = array(
 						'code'    => 'DISALLOWED_STREAM_WRAPPER',
 						'path'    => $path,
-						'message' => sprintf( 'Stream "%s" uses disallowed network wrapper.', $path ),
+						'message' => sprintf( 'Stream for "%s" uses an unsupported or non-local stream wrapper.', $path ),
 					);
 					continue;
 				}

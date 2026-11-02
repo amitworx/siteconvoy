@@ -57,8 +57,7 @@ class PackageManifest implements JsonSerializable {
 	 */
 	public function __construct( $mode, array $source, array $entries ) {
 		if ( ! MigrationMode::is_valid( $mode ) ) {
-			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped
-			throw new InvalidArgumentException( sprintf( 'Invalid migration mode "%s".', $mode ) );
+			throw new InvalidArgumentException( 'Invalid migration mode specified.' );
 		}
 
 		$this->mode   = $mode;
@@ -76,8 +75,12 @@ class PackageManifest implements JsonSerializable {
 				throw new InvalidArgumentException( sprintf( 'Invalid manifest entry: %s', $validation['error'] ) );
 			}
 
-			$path       = $entry['path'];
-			$lower_path = strtolower( $path );
+			$path = $entry['path'];
+			if ( function_exists( 'mb_strtolower' ) ) {
+				$lower_path = mb_strtolower( $path, 'UTF-8' );
+			} else {
+				$lower_path = strtolower( $path );
+			}
 
 			if ( isset( $seen_paths[ $path ] ) ) {
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped
@@ -127,8 +130,7 @@ class PackageManifest implements JsonSerializable {
 		$allowed_keys = array( 'is_multisite', 'network_id', 'site_id', 'site_count', 'base_prefix' );
 		foreach ( array_keys( $source ) as $key ) {
 			if ( ! in_array( $key, $allowed_keys, true ) ) {
-				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped
-				throw new InvalidArgumentException( sprintf( 'Unexpected key "%s" in source topology.', $key ) );
+				throw new InvalidArgumentException( 'Unexpected key in source topology metadata.' );
 			}
 		}
 
@@ -154,8 +156,14 @@ class PackageManifest implements JsonSerializable {
 			throw new InvalidArgumentException( 'Source site_count must be a positive integer or null.' );
 		}
 
-		if ( null !== $base_prefix && ( ! is_string( $base_prefix ) || '' === $base_prefix ) ) {
-			throw new InvalidArgumentException( 'Source base_prefix must be a non-empty string.' );
+		if ( null !== $base_prefix ) {
+			if ( ! is_string( $base_prefix ) || '' === $base_prefix ) {
+				throw new InvalidArgumentException( 'Source base_prefix must be a non-empty string.' );
+			}
+			// Enforce WordPress table prefix syntax: conservative alphanumeric and underscore grammar.
+			if ( ! preg_match( '/^[a-zA-Z0-9_]+$/', $base_prefix ) ) {
+				throw new InvalidArgumentException( 'Source base_prefix contains invalid characters; only alphanumeric characters and underscores are permitted.' );
+			}
 		}
 
 		// Enforce mode-specific topology invariants.

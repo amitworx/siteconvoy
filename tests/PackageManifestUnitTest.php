@@ -357,7 +357,7 @@ class PackageManifestUnitTest extends TestCase {
 			new PackageManifest( MigrationMode::STANDALONE_TO_SUBSITE, $secret_source, $valid_entries );
 			$this->fail( 'Expected InvalidArgumentException for unexpected secret key in source.' );
 		} catch ( \InvalidArgumentException $e ) {
-			$this->assertStringContainsString( 'Unexpected key "db_password"', $e->getMessage() );
+			$this->assertStringContainsString( 'Unexpected key in source topology', $e->getMessage() );
 		}
 
 		// 2. Mode contradictions: subsite_to_standalone with is_multisite = false.
@@ -553,5 +553,137 @@ class PackageManifestUnitTest extends TestCase {
 		);
 		$this->assertFalse( $res_dup->is_success() );
 		$this->assertSame( 'DUPLICATE_STREAM_RESOURCE', $res_dup->get_errors()[0]['code'] );
+
+		// 3. Reject nonlocal stream wrappers: data:// wrapper.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$s_data = fopen( 'data://text/plain;base64,aGVsbG8=', 'r' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$s_temp   = fopen( 'php://temp', 'r+' );
+		$res_data = $verifier->verify(
+			$manifest,
+			array(
+				'database/schema.sql' => $s_data,
+				'assets/empty.txt'    => $s_temp,
+			)
+		);
+		$this->assertFalse( $res_data->is_success() );
+		$this->assertSame( 'DISALLOWED_STREAM_WRAPPER', $res_data->get_errors()[0]['code'] );
+
+		// 4. Reject php://filter wrappers even if reported under PHP wrapper.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$s_filter = fopen( 'php://filter/read=string.rot13/resource=php://temp', 'r+' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$s_temp2    = fopen( 'php://temp', 'r+' );
+		$res_filter = $verifier->verify(
+			$manifest,
+			array(
+				'database/schema.sql' => $s_filter,
+				'assets/empty.txt'    => $s_temp2,
+			)
+		);
+		$this->assertFalse( $res_filter->is_success() );
+		$this->assertSame( 'DISALLOWED_STREAM_WRAPPER', $res_filter->get_errors()[0]['code'] );
+
+		// 5. Reject write-only stream handles.
+		$tmp_file = tempnam( sys_get_temp_dir(), 'sc_test_' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$s_writeonly = fopen( $tmp_file, 'w' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$s_temp3   = fopen( 'php://temp', 'r+' );
+		$res_write = $verifier->verify(
+			$manifest,
+			array(
+				'database/schema.sql' => $s_writeonly,
+				'assets/empty.txt'    => $s_temp3,
+			)
+		);
+		if ( file_exists( $tmp_file ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_unlink, WordPress.WP.AlternativeFunctions.unlink_unlink
+			unlink( $tmp_file );
+		}
+		$this->assertFalse( $res_write->is_success() );
+		$this->assertSame( 'UNREADABLE_STREAM', $res_write->get_errors()[0]['code'] );
+	}
+
+	/**
+	 * Test UTF-8 and cross-platform Unicode filename validation and casefold collision rejection.
+	 */
+	public function test_utf8_and_unicode_filename_validation() {
+		// 1. Valid UTF-8 filenames with international characters are accepted.
+		$res_valid_unicode = PackageManifestValidator::validate_path( 'uploads/2026/01/ünicode-ö.jpg' );
+		$this->assertTrue( $res_valid_unicode['valid'], 'Valid UTF-8 path should be accepted.' );
+
+		// 2. Malformed / invalid UTF-8 byte sequences are rejected.
+		$invalid_utf8     = "uploads/bad-\xC3\x28-sequence.jpg";
+		$res_invalid_utf8 = PackageManifestValidator::validate_path( $invalid_utf8 );
+		$this->assertFalse( $res_invalid_utf8['valid'], 'Invalid UTF-8 byte sequence must be rejected.' );
+
+		// 3. Unicode case-fold collision rejection in PackageManifest.
+		$source                    = array(
+			'is_multisite' => false,
+			'site_id'      => 1,
+			'network_id'   => null,
+			'base_prefix'  => 'wp_',
+		);
+		$unicode_collision_entries = array(
+			array(
+				'path'   => 'uploads/Ü.png',
+				'size'   => 5,
+				'sha256' => hash( 'sha256', 'first' ),
+			),
+			array(
+				'path'   => 'uploads/ü.png',
+				'size'   => 5,
+				'sha256' => hash( 'sha256', 'second' ),
+			),
+		);
+		$this->expectException( \InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'Case-collision duplicate entry path' );
+		new PackageManifest( MigrationMode::STANDALONE_TO_SUBSITE, $source, $unicode_collision_entries );
+	}
+
+	/**
+	 * Test base_prefix validation and error message sanitization.
+	 */
+	public function test_base_prefix_validation_and_error_sanitization() {
+		$valid_entries = array(
+			array(
+				'path'   => 'database/schema.sql',
+				'size'   => 5,
+				'sha256' => hash( 'sha256', 'hello' ),
+			),
+		);
+
+		// 1. Hostile base_prefix with secret or path traversal is rejected.
+		$hostile_prefix_source = array(
+			'is_multisite' => false,
+			'site_id'      => 1,
+			'network_id'   => null,
+			'base_prefix'  => '/etc/passwd/secret_wp_',
+		);
+		try {
+			new PackageManifest( MigrationMode::STANDALONE_TO_SUBSITE, $hostile_prefix_source, $valid_entries );
+			$this->fail( 'Expected InvalidArgumentException for hostile base_prefix.' );
+		} catch ( \InvalidArgumentException $e ) {
+			// Exception message must be generic and not leak secret path.
+			$this->assertStringNotContainsString( 'secret_wp_', $e->getMessage() );
+			$this->assertStringNotContainsString( '/etc/passwd', $e->getMessage() );
+		}
+
+		// 2. Hostile source key containing secret password name is sanitized in exception.
+		$hostile_key_source = array(
+			'is_multisite'               => false,
+			'site_id'                    => 1,
+			'network_id'                 => null,
+			'base_prefix'                => 'wp_',
+			'user_password_secret_token' => 'leaked_value',
+		);
+		try {
+			new PackageManifest( MigrationMode::STANDALONE_TO_SUBSITE, $hostile_key_source, $valid_entries );
+			$this->fail( 'Expected InvalidArgumentException for hostile source key.' );
+		} catch ( \InvalidArgumentException $e ) {
+			$this->assertStringNotContainsString( 'user_password_secret_token', $e->getMessage() );
+			$this->assertStringNotContainsString( 'leaked_value', $e->getMessage() );
+		}
 	}
 }
