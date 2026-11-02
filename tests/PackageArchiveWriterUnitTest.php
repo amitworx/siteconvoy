@@ -1,0 +1,986 @@
+<?php
+/**
+ * Package Archive Writer Unit Tests.
+ *
+ * Verifies standard ZIP archive creation, bounded-memory streaming, SHA-256 verification,
+ * manifest encoding, deterministic contents, temp workspace security, and failure cleanup.
+ *
+ * @package SiteConvoy
+ */
+
+namespace SiteConvoy\Tests;
+
+use PHPUnit\Framework\TestCase;
+use SiteConvoy\Contracts\MigrationMode;
+use SiteConvoy\Package\PackageManifest;
+use SiteConvoy\Package\PackageArchiveWriter;
+use SiteConvoy\Package\PackageArchiveWriterResult;
+use ZipArchive;
+
+/**
+ * Class PackageArchiveWriterUnitTest
+ */
+class PackageArchiveWriterUnitTest extends TestCase {
+
+	/**
+	 * Temporary directory for tests.
+	 *
+	 * @var string
+	 */
+	private $temp_dir;
+
+	/**
+	 * Set up test environment.
+	 */
+	protected function setUp(): void {
+		parent::setUp();
+		$this->temp_dir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'sc_writer_test_' . uniqid();
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
+		mkdir( $this->temp_dir, 0700, true );
+	}
+
+	/**
+	 * Tear down test environment.
+	 */
+	protected function tearDown(): void {
+		$this->recursive_remove_dir( $this->temp_dir );
+		parent::tearDown();
+	}
+
+	/**
+	 * Recursively remove directory.
+	 *
+	 * @param string $dir Directory path.
+	 */
+	private function recursive_remove_dir( $dir ) {
+		if ( ! is_dir( $dir ) ) {
+			return;
+		}
+		$items = scandir( $dir );
+		if ( false === $items ) {
+			return;
+		}
+		foreach ( $items as $item ) {
+			if ( '.' === $item || '..' === $item ) {
+				continue;
+			}
+			$path = $dir . DIRECTORY_SEPARATOR . $item;
+			if ( is_dir( $path ) ) {
+				$this->recursive_remove_dir( $path );
+			} else {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_unlink, WordPress.WP.AlternativeFunctions.unlink_unlink
+				unlink( $path );
+			}
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
+		rmdir( $dir );
+	}
+
+	/**
+	 * Helper: Create a synthetic in-memory stream with given content.
+	 *
+	 * @param string $content Content string.
+	 * @return resource
+	 */
+	private function create_stream( $content ) {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$stream = fopen( 'php://temp', 'r+' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+		fwrite( $stream, $content );
+		rewind( $stream );
+		return $stream;
+	}
+
+	/**
+	 * Test class exists and can be instantiated.
+	 */
+	public function test_writer_instantiation() {
+		$writer = new PackageArchiveWriter();
+		$this->assertInstanceOf( PackageArchiveWriter::class, $writer );
+	}
+
+	/**
+	 * Test writing a valid ZIP package with synthetic payloads.
+	 */
+	public function test_write_valid_synthetic_package() {
+		$content1 = 'CREATE TABLE wp_posts (id INT);';
+		$content2 = 'media-file-bytes-12345';
+		$content3 = '';
+
+		$entries = array(
+			array(
+				'path'   => 'database/wp_posts.sql',
+				'size'   => strlen( $content1 ),
+				'sha256' => hash( 'sha256', $content1 ),
+				'type'   => 'regular',
+			),
+			array(
+				'path'   => 'uploads/photo.jpg',
+				'size'   => strlen( $content2 ),
+				'sha256' => hash( 'sha256', $content2 ),
+				'type'   => 'regular',
+			),
+			array(
+				'path'   => 'assets/empty.txt',
+				'size'   => strlen( $content3 ),
+				'sha256' => hash( 'sha256', $content3 ),
+				'type'   => 'regular',
+			),
+		);
+
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$streams = array(
+			'database/wp_posts.sql' => $this->create_stream( $content1 ),
+			'uploads/photo.jpg'     => $this->create_stream( $content2 ),
+			'assets/empty.txt'      => $this->create_stream( $content3 ),
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'package.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'staging';
+
+		$writer = new PackageArchiveWriter();
+		$result = $writer->write( $manifest, $streams, $output_path, $staging_dir );
+
+		$this->assertInstanceOf( PackageArchiveWriterResult::class, $result );
+		$this->assertTrue( $result->is_success(), 'Writer must succeed: ' . wp_json_encode( $result->get_errors() ) );
+		$this->assertFileExists( $output_path );
+
+		// Open via ZipArchive independently and verify contents.
+		$zip = new ZipArchive();
+		$this->assertTrue( $zip->open( $output_path ) );
+
+		// Exact 4 entries: manifest.json + 3 declared payload entries.
+		// phpcs:ignore WordPress.NamingConventions.ValidVariableName.UsedPropertyNotSnakeCase
+		$this->assertSame( 4, $zip->numFiles );
+
+		$names = array();
+		// phpcs:ignore WordPress.NamingConventions.ValidVariableName.UsedPropertyNotSnakeCase
+		for ( $i = 0; $i < $zip->numFiles; $i++ ) {
+			$names[] = $zip->getNameIndex( $i );
+		}
+		// Deterministic sorted order.
+		$this->assertSame(
+			array( 'assets/empty.txt', 'database/wp_posts.sql', 'manifest.json', 'uploads/photo.jpg' ),
+			$names
+		);
+
+		// Verify manifest.json matches schema and payload.
+		$manifest_json = $zip->getFromName( 'manifest.json' );
+		$this->assertIsString( $manifest_json );
+		$manifest_data = json_decode( $manifest_json, true );
+		$this->assertSame( '1.0', $manifest_data['format_version'] );
+		$this->assertSame( MigrationMode::STANDALONE_TO_SUBSITE, $manifest_data['mode'] );
+		$this->assertSame( 3, count( $manifest_data['entries'] ) );
+
+		// Verify member bytes.
+		$this->assertSame( $content1, $zip->getFromName( 'database/wp_posts.sql' ) );
+		$this->assertSame( $content2, $zip->getFromName( 'uploads/photo.jpg' ) );
+		$this->assertSame( $content3, $zip->getFromName( 'assets/empty.txt' ) );
+
+		$zip->close();
+
+		// Ensure staging directory was cleaned up.
+		$this->assertDirectoryDoesNotExist( $staging_dir );
+	}
+
+	/**
+	 * Test all four migration modes produce valid ZIP packages with synthetic payloads.
+	 */
+	public function test_all_four_modes_produce_valid_packages() {
+		$modes = array(
+			MigrationMode::SUBSITE_TO_STANDALONE   => array(
+				'is_multisite' => true,
+				'network_id'   => 1,
+				'site_id'      => 2,
+				'base_prefix'  => 'wp_',
+			),
+			MigrationMode::SUBSITE_TO_MULTISITE    => array(
+				'is_multisite' => true,
+				'network_id'   => 1,
+				'site_id'      => 3,
+				'base_prefix'  => 'wp_',
+			),
+			MigrationMode::FULL_NETWORK_TO_NEW_ENV => array(
+				'is_multisite' => true,
+				'network_id'   => 1,
+				'site_count'   => 5,
+				'base_prefix'  => 'wp_',
+			),
+			MigrationMode::STANDALONE_TO_SUBSITE   => array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+		);
+
+		$writer = new PackageArchiveWriter();
+
+		foreach ( $modes as $mode => $source ) {
+			$content  = "DUMP FOR MODE {$mode}";
+			$entries  = array(
+				array(
+					'path'   => 'database/dump.sql',
+					'size'   => strlen( $content ),
+					'sha256' => hash( 'sha256', $content ),
+				),
+			);
+			$manifest = new PackageManifest( $mode, $source, $entries );
+			$streams  = array(
+				'database/dump.sql' => $this->create_stream( $content ),
+			);
+
+			$pkg_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'pkg_' . $mode . '.zip';
+			$stg_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'stg_' . $mode;
+
+			$res = $writer->write( $manifest, $streams, $pkg_path, $stg_path );
+			$this->assertTrue( $res->is_success(), "Failed writing package for mode {$mode}" );
+			$this->assertFileExists( $pkg_path );
+
+			$zip = new ZipArchive();
+			$this->assertTrue( $zip->open( $pkg_path ) );
+			// phpcs:ignore WordPress.NamingConventions.ValidVariableName.UsedPropertyNotSnakeCase
+			$this->assertSame( 2, $zip->numFiles );
+			$manifest_data = json_decode( (string) $zip->getFromName( 'manifest.json' ), true );
+			$this->assertSame( $mode, $manifest_data['mode'] );
+			$zip->close();
+		}
+	}
+
+	/**
+	 * Test deterministic byte reproducibility across repeated package writes.
+	 */
+	public function test_deterministic_byte_reproducibility() {
+		$c1 = 'payload-part-1';
+		$c2 = 'payload-part-2';
+
+		$entries = array(
+			array(
+				'path'   => 'database/posts.sql',
+				'size'   => strlen( $c1 ),
+				'sha256' => hash( 'sha256', $c1 ),
+			),
+			array(
+				'path'   => 'uploads/file.png',
+				'size'   => strlen( $c2 ),
+				'sha256' => hash( 'sha256', $c2 ),
+			),
+		);
+
+		$source = array(
+			'is_multisite' => false,
+			'site_id'      => 1,
+			'base_prefix'  => 'wp_',
+		);
+
+		$writer = new PackageArchiveWriter();
+
+		$m1 = new PackageManifest( MigrationMode::STANDALONE_TO_SUBSITE, $source, $entries );
+		$s1 = array(
+			'database/posts.sql' => $this->create_stream( $c1 ),
+			'uploads/file.png'   => $this->create_stream( $c2 ),
+		);
+		$p1 = $this->temp_dir . DIRECTORY_SEPARATOR . 'pkg1.zip';
+		$r1 = $writer->write( $m1, $s1, $p1, $this->temp_dir . DIRECTORY_SEPARATOR . 'stg1' );
+		$this->assertTrue( $r1->is_success() );
+
+		// Sleep 1 second to ensure non-deterministic clocks would have differed.
+		sleep( 1 );
+
+		$m2 = new PackageManifest( MigrationMode::STANDALONE_TO_SUBSITE, $source, $entries );
+		$s2 = array(
+			'database/posts.sql' => $this->create_stream( $c1 ),
+			'uploads/file.png'   => $this->create_stream( $c2 ),
+		);
+		$p2 = $this->temp_dir . DIRECTORY_SEPARATOR . 'pkg2.zip';
+		$r2 = $writer->write( $m2, $s2, $p2, $this->temp_dir . DIRECTORY_SEPARATOR . 'stg2' );
+		$this->assertTrue( $r2->is_success() );
+
+		$hash1 = hash_file( 'sha256', $p1 );
+		$hash2 = hash_file( 'sha256', $p2 );
+		$this->assertSame( $hash1, $hash2, 'ZIP output must be bit-for-bit deterministic.' );
+	}
+
+	/**
+	 * Test bounded memory streaming on multi-megabyte synthetic payloads.
+	 */
+	public function test_multi_megabyte_payload_bounded_memory() {
+		// 4 MB synthetic payload stream.
+		$chunk_pattern = str_repeat( 'A', 65536 ); // 64 KB pattern
+		$total_chunks  = 64; // 64 * 64 KB = 4 MB
+		$total_bytes   = $total_chunks * 65536;
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$stream   = fopen( 'php://temp', 'r+' );
+		$hash_ctx = hash_init( 'sha256' );
+		for ( $i = 0; $i < $total_chunks; $i++ ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+			fwrite( $stream, $chunk_pattern );
+			hash_update( $hash_ctx, $chunk_pattern );
+		}
+		rewind( $stream );
+		$expected_hash = hash_final( $hash_ctx );
+
+		$entries = array(
+			array(
+				'path'   => 'database/large_dump.sql',
+				'size'   => $total_bytes,
+				'sha256' => $expected_hash,
+			),
+		);
+
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$pkg_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'large.zip';
+		$stg_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'large_stg';
+
+		$mem_before = memory_get_usage();
+
+		$writer = new PackageArchiveWriter( 65536 );
+		$res    = $writer->write( $manifest, array( 'database/large_dump.sql' => $stream ), $pkg_path, $stg_path );
+
+		$mem_after = memory_get_usage();
+
+		$this->assertTrue( $res->is_success() );
+		$this->assertFileExists( $pkg_path );
+
+		// The memory delta should be well under 4 MB (e.g. under 1.5 MB for metadata/ZipArchive overhead).
+		$mem_delta = $mem_after - $mem_before;
+		$this->assertLessThan( 2000000, $mem_delta, 'Memory usage must remain bounded during streaming.' );
+
+		$zip = new ZipArchive();
+		$this->assertTrue( $zip->open( $pkg_path ) );
+		$stat = $zip->statName( 'database/large_dump.sql' );
+		$this->assertSame( $total_bytes, $stat['size'] );
+		$zip->close();
+	}
+
+	/**
+	 * Test no-clobber behavior: will not overwrite existing destination file.
+	 */
+	public function test_will_not_overwrite_existing_destination() {
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'existing.zip';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+		file_put_contents( $output_path, 'CANNOT_TOUCH' );
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/file.txt',
+				'size'   => 4,
+				'sha256' => hash( 'sha256', 'test' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$writer = new PackageArchiveWriter();
+		$res    = $writer->write(
+			$manifest,
+			array( 'assets/file.txt' => $this->create_stream( 'test' ) ),
+			$output_path,
+			$this->temp_dir . DIRECTORY_SEPARATOR . 'stg'
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'DESTINATION_ALREADY_EXISTS', $res->get_errors()[0]['code'] );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		$this->assertSame( 'CANNOT_TOUCH', file_get_contents( $output_path ) );
+	}
+
+	/**
+	 * Test failure on hash corruption, cleanup of temporary staging files, and no partial archive published.
+	 */
+	public function test_hash_corruption_fails_and_cleans_up() {
+		$content  = 'actual-bytes';
+		$bad_hash = hash( 'sha256', 'different-bytes' );
+
+		$entries  = array(
+			array(
+				'path'   => 'database/dump.sql',
+				'size'   => strlen( $content ),
+				'sha256' => $bad_hash,
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'corrupt.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'corrupt_stg';
+
+		$writer = new PackageArchiveWriter();
+		$res    = $writer->write(
+			$manifest,
+			array( 'database/dump.sql' => $this->create_stream( $content ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'CHECKSUM_MISMATCH', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+		$this->assertDirectoryDoesNotExist( $staging_dir );
+	}
+
+	/**
+	 * Test failure on stream size mismatch (stream has fewer bytes than declared).
+	 */
+	public function test_short_stream_fails_and_cleans_up() {
+		$entries  = array(
+			array(
+				'path'   => 'database/dump.sql',
+				'size'   => 100, // Declared 100 bytes, stream only has 5 bytes.
+				'sha256' => hash( 'sha256', 'hello' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'short.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'short_stg';
+
+		$writer = new PackageArchiveWriter();
+		$res    = $writer->write(
+			$manifest,
+			array( 'database/dump.sql' => $this->create_stream( 'hello' ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'SIZE_MISMATCH', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+		$this->assertDirectoryDoesNotExist( $staging_dir );
+	}
+
+	/**
+	 * Test missing stream fails before writing.
+	 */
+	public function test_missing_stream_fails() {
+		$entries  = array(
+			array(
+				'path'   => 'database/dump.sql',
+				'size'   => 5,
+				'sha256' => hash( 'sha256', 'hello' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'missing.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'missing_stg';
+
+		$writer = new PackageArchiveWriter();
+		$res    = $writer->write(
+			$manifest,
+			array(), // Empty stream map.
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'STREAM_MISSING', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+	}
+
+	/**
+	 * Test unexpected extra stream in stream map fails.
+	 */
+	public function test_unexpected_stream_fails() {
+		$entries  = array(
+			array(
+				'path'   => 'database/dump.sql',
+				'size'   => 5,
+				'sha256' => hash( 'sha256', 'hello' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'extra.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'extra_stg';
+
+		$writer = new PackageArchiveWriter();
+		$res    = $writer->write(
+			$manifest,
+			array(
+				'database/dump.sql' => $this->create_stream( 'hello' ),
+				'assets/extra.txt'  => $this->create_stream( 'unexpected' ),
+			),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'UNEXPECTED_STREAM', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+	}
+
+	/**
+	 * Test duplicate stream handle across multiple entries fails.
+	 */
+	public function test_duplicate_stream_handle_fails() {
+		$entries  = array(
+			array(
+				'path'   => 'database/dump1.sql',
+				'size'   => 5,
+				'sha256' => hash( 'sha256', 'hello' ),
+			),
+			array(
+				'path'   => 'database/dump2.sql',
+				'size'   => 5,
+				'sha256' => hash( 'sha256', 'hello' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$shared_stream = $this->create_stream( 'hello' );
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'dup.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'dup_stg';
+
+		$writer = new PackageArchiveWriter();
+		$res    = $writer->write(
+			$manifest,
+			array(
+				'database/dump1.sql' => $shared_stream,
+				'database/dump2.sql' => $shared_stream,
+			),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'DUPLICATE_STREAM_RESOURCE', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+	}
+
+	/**
+	 * Test write-only stream handle is rejected.
+	 */
+	public function test_write_only_stream_is_rejected() {
+		$tmp_file = tempnam( sys_get_temp_dir(), 'sc_wo_' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$write_only = fopen( $tmp_file, 'w' );
+
+		$entries  = array(
+			array(
+				'path'   => 'database/dump.sql',
+				'size'   => 5,
+				'sha256' => hash( 'sha256', 'hello' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$writer = new PackageArchiveWriter();
+		$res    = $writer->write(
+			$manifest,
+			array( 'database/dump.sql' => $write_only ),
+			$this->temp_dir . DIRECTORY_SEPARATOR . 'wo.zip',
+			$this->temp_dir . DIRECTORY_SEPARATOR . 'wo_stg'
+		);
+
+		if ( file_exists( $tmp_file ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_unlink, WordPress.WP.AlternativeFunctions.unlink_unlink
+			unlink( $tmp_file );
+		}
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'UNREADABLE_STREAM', $res->get_errors()[0]['code'] );
+	}
+
+	/**
+	 * Test close_streams option behaves as requested.
+	 */
+	public function test_close_streams_flag_behavior() {
+		$s1       = $this->create_stream( 'hello' );
+		$entries  = array(
+			array(
+				'path'   => 'database/dump.sql',
+				'size'   => 5,
+				'sha256' => hash( 'sha256', 'hello' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$writer = new PackageArchiveWriter();
+		$res    = $writer->write(
+			$manifest,
+			array( 'database/dump.sql' => $s1 ),
+			$this->temp_dir . DIRECTORY_SEPARATOR . 'close_false.zip',
+			$this->temp_dir . DIRECTORY_SEPARATOR . 'close_stg',
+			false // close_streams = false.
+		);
+
+		$this->assertTrue( $res->is_success() );
+		$this->assertTrue( is_resource( $s1 ), 'Stream handle should remain open when close_streams=false.' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+		fclose( $s1 );
+	}
+
+	/**
+	 * Test detection and rejection of symlink member in finalized ZIP before publication.
+	 */
+	public function test_rejection_of_symlink_member_before_publication() {
+		// Create a test writer subclass that injects a symlink into the temp zip before close.
+		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Hook before closing zip to inject a symlink attribute.
+			 *
+			 * @param ZipArchive $zip Zip archive instance.
+			 * @param string     $temp_archive_path Temporary zip path.
+			 */
+			protected function before_close_zip( ZipArchive $zip, $temp_archive_path ) {
+				// Inject a symlink attribute on assets/empty.txt.
+				$zip->setExternalAttributesName( 'assets/empty.txt', ZipArchive::OPSYS_UNIX, 0120777 << 16 );
+			}
+		};
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/empty.txt',
+				'size'   => 0,
+				'sha256' => hash( 'sha256', '' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'symlink_test.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'symlink_stg';
+
+		$res = $writer->write(
+			$manifest,
+			array( 'assets/empty.txt' => $this->create_stream( '' ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'ZIP_SYMLINK_MEMBER_PROHIBITED', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+	}
+
+	/**
+	 * Test detection and rejection of unexpected member in finalized ZIP before publication.
+	 */
+	public function test_rejection_of_unexpected_member_before_publication() {
+		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Hook before closing zip to inject an unexpected member.
+			 *
+			 * @param ZipArchive $zip Zip archive instance.
+			 * @param string     $temp_archive_path Temporary zip path.
+			 */
+			protected function before_close_zip( ZipArchive $zip, $temp_archive_path ) {
+				// Inject an extraneous member into the zip.
+				$zip->addFromString( 'assets/injected.txt', 'malicious payload' );
+			}
+		};
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/empty.txt',
+				'size'   => 0,
+				'sha256' => hash( 'sha256', '' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'unexpected_test.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'unexpected_stg';
+
+		$res = $writer->write(
+			$manifest,
+			array( 'assets/empty.txt' => $this->create_stream( '' ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'ZIP_MEMBER_COUNT_MISMATCH', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+	}
+
+	/**
+	 * Test detection and rejection of directory member in finalized ZIP before publication.
+	 */
+	public function test_rejection_of_directory_member_before_publication() {
+		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Hook before closing zip to inject a directory member.
+			 *
+			 * @param ZipArchive $zip Zip archive instance.
+			 * @param string     $temp_archive_path Temporary zip path.
+			 */
+			protected function before_close_zip( ZipArchive $zip, $temp_archive_path ) {
+				// Inject a directory entry into the zip.
+				$zip->addEmptyDir( 'uploads/nested/' );
+			}
+		};
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/empty.txt',
+				'size'   => 0,
+				'sha256' => hash( 'sha256', '' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'directory_test.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'directory_stg';
+
+		$res = $writer->write(
+			$manifest,
+			array( 'assets/empty.txt' => $this->create_stream( '' ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertFileDoesNotExist( $output_path );
+	}
+
+	/**
+	 * Test failure simulation when ZIP close fails.
+	 */
+	public function test_zip_close_failure_simulation() {
+		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Simulate zip close failure.
+			 *
+			 * @param ZipArchive $zip Zip archive instance.
+			 * @return bool
+			 */
+			protected function execute_zip_close( ZipArchive $zip ) {
+				// Close the zip object properly first so PHP/libzip can destroy context, then return false.
+				$zip->close();
+				return false;
+			}
+		};
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/empty.txt',
+				'size'   => 0,
+				'sha256' => hash( 'sha256', '' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'close_fail.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'close_fail_stg';
+
+		$res = $writer->write(
+			$manifest,
+			array( 'assets/empty.txt' => $this->create_stream( '' ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'ZIP_CLOSE_FAILED', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+	}
+
+	/**
+	 * Test non-ASCII filename support in ZIP writer when runtime extensions are present.
+	 */
+	public function test_unicode_entry_path_in_zip_package() {
+		if ( ! function_exists( 'normalizer_is_normalized' ) || ! defined( 'Normalizer::FORM_C' ) ) {
+			$this->markTestSkipped( 'PHP intl extension not loaded in this environment.' );
+		}
+
+		$unicode_path = 'uploads/2026/01/café-photo.jpg';
+		$content      = 'unicode-image-bytes';
+
+		$entries  = array(
+			array(
+				'path'   => $unicode_path,
+				'size'   => strlen( $content ),
+				'sha256' => hash( 'sha256', $content ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'unicode.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'unicode_stg';
+
+		$writer = new PackageArchiveWriter();
+		$res    = $writer->write(
+			$manifest,
+			array( $unicode_path => $this->create_stream( $content ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertTrue( $res->is_success(), 'Unicode package writing must succeed when extensions available.' );
+		$this->assertFileExists( $output_path );
+
+		$zip = new ZipArchive();
+		$this->assertTrue( $zip->open( $output_path ) );
+		$this->assertSame( $content, $zip->getFromName( $unicode_path ) );
+		$zip->close();
+	}
+
+	/**
+	 * Test safe rejection when ZipArchive is unavailable.
+	 */
+	public function test_ziparchive_unavailable_safe_handling() {
+		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Simulate unavailable zip extension.
+			 *
+			 * @return bool
+			 */
+			protected function is_zip_available() {
+				return false;
+			}
+		};
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/empty.txt',
+				'size'   => 0,
+				'sha256' => hash( 'sha256', '' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'no_zip.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'no_zip_stg';
+
+		$res = $writer->write(
+			$manifest,
+			array( 'assets/empty.txt' => $this->create_stream( '' ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'ZIP_CAPABILITY_UNAVAILABLE', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+	}
+}
