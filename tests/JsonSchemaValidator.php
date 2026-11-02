@@ -5,6 +5,11 @@
  * Provides recursive structural validation for JSON-serialized MigrationPlan
  * contracts against schemas/migration-plan.json.
  *
+ * NOTE: This is a supported-keyword structural validator for test assertions,
+ * validating types (stdClass objects vs arrays, strings, integers, booleans, null),
+ * const, enum, maxProperties, required keys, properties, items, and allOf/if-then
+ * conditionals. It is not an arbitrary full draft-2020-12 engine.
+ *
  * @package SiteConvoy
  */
 
@@ -16,9 +21,10 @@ namespace SiteConvoy\Tests;
 class JsonSchemaValidator {
 
 	/**
-	 * Validate decoded JSON data against a JSON schema array.
+	 * Validate decoded JSON data (using stdClass for objects and array for arrays)
+	 * against a JSON schema array.
 	 *
-	 * @param mixed                $data   Decoded JSON data.
+	 * @param mixed                $data   Decoded JSON data (objects as stdClass, arrays as array).
 	 * @param array<string, mixed> $schema JSON schema array.
 	 * @param string               $path   Current path for error reporting.
 	 * @return array<int, string> List of validation error strings.
@@ -44,24 +50,12 @@ class JsonSchemaValidator {
 				} elseif ( 'boolean' === $type && is_bool( $data ) ) {
 					$matched = true;
 					break;
-				} elseif ( 'object' === $type && is_array( $data ) ) {
-					// In JSON decoded to associative array, an object is represented as array.
-					// An empty array in json_decode could be [] or {}.
-					// But if it has integer sequential keys, it was [].
-					if ( empty( $data ) ) {
-						// Note: for strictness, empty array can be an empty object {}.
-						$matched = true;
-					} elseif ( array_keys( $data ) !== range( 0, count( $data ) - 1 ) ) {
-						$matched = true;
-					}
-					if ( $matched ) {
-						break;
-					}
+				} elseif ( 'object' === $type && is_object( $data ) ) {
+					$matched = true;
+					break;
 				} elseif ( 'array' === $type && is_array( $data ) ) {
-					if ( empty( $data ) || array_keys( $data ) === range( 0, count( $data ) - 1 ) ) {
-						$matched = true;
-						break;
-					}
+					$matched = true;
+					break;
 				}
 			}
 
@@ -69,8 +63,10 @@ class JsonSchemaValidator {
 				$actual_type = gettype( $data );
 				if ( 'NULL' === $actual_type ) {
 					$actual_type = 'null';
+				} elseif ( is_object( $data ) ) {
+					$actual_type = 'object';
 				} elseif ( is_array( $data ) ) {
-					$actual_type = ( empty( $data ) || array_keys( $data ) === range( 0, count( $data ) - 1 ) ) ? 'array' : 'object';
+					$actual_type = 'array';
 				}
 				$errors[] = sprintf( '%s: expected type [%s], got %s', $path, implode( ', ', $expected_types ), $actual_type );
 				return $errors;
@@ -97,25 +93,28 @@ class JsonSchemaValidator {
 			}
 		}
 
-		// 4. Validate maxProperties.
-		if ( isset( $schema['maxProperties'] ) && is_array( $data ) ) {
-			if ( count( $data ) > (int) $schema['maxProperties'] ) {
-				$errors[] = sprintf( '%s: expected at most %d properties, found %d', $path, $schema['maxProperties'], count( $data ) );
+		// 4. Validate maxProperties (for objects).
+		if ( isset( $schema['maxProperties'] ) && is_object( $data ) ) {
+			$prop_count = count( get_object_vars( $data ) );
+			if ( $prop_count > (int) $schema['maxProperties'] ) {
+				$errors[] = sprintf( '%s: expected at most %d properties, found %d', $path, $schema['maxProperties'], $prop_count );
 			}
 		}
 
 		// 5. Validate object properties and required keys.
-		if ( is_array( $data ) && ( empty( $data ) || array_keys( $data ) !== range( 0, count( $data ) - 1 ) ) ) {
+		if ( is_object( $data ) ) {
+			$data_vars = get_object_vars( $data );
+
 			if ( isset( $schema['required'] ) && is_array( $schema['required'] ) ) {
 				foreach ( $schema['required'] as $req_prop ) {
-					if ( ! array_key_exists( $req_prop, $data ) ) {
+					if ( ! array_key_exists( $req_prop, $data_vars ) ) {
 						$errors[] = sprintf( '%s: missing required property "%s"', $path, $req_prop );
 					}
 				}
 			}
 
 			if ( isset( $schema['properties'] ) && is_array( $schema['properties'] ) ) {
-				foreach ( $data as $prop => $val ) {
+				foreach ( $data_vars as $prop => $val ) {
 					if ( isset( $schema['properties'][ $prop ] ) ) {
 						$sub_errors = self::validate( $val, $schema['properties'][ $prop ], $path . '.' . $prop );
 						$errors     = array_merge( $errors, $sub_errors );
@@ -125,7 +124,7 @@ class JsonSchemaValidator {
 		}
 
 		// 6. Validate array items.
-		if ( is_array( $data ) && ( empty( $data ) || array_keys( $data ) === range( 0, count( $data ) - 1 ) ) ) {
+		if ( is_array( $data ) ) {
 			if ( isset( $schema['items'] ) && is_array( $schema['items'] ) ) {
 				foreach ( $data as $idx => $item ) {
 					$sub_errors = self::validate( $item, $schema['items'], sprintf( '%s[%d]', $path, $idx ) );

@@ -603,8 +603,9 @@ class MigrationPlanUnitTest extends TestCase {
 			$decoded = json_decode( $json_str, true );
 			$this->assertIsArray( $decoded );
 
-			// Strict recursive schema validation.
-			$errors = JsonSchemaValidator::validate( $decoded, $schema );
+			// Strict recursive schema validation using type-preserving json_decode.
+			$decoded_preserve = json_decode( $json_str );
+			$errors           = JsonSchemaValidator::validate( $decoded_preserve, $schema );
 			$this->assertEmpty( $errors, sprintf( "Plan index %d failed JSON schema validation:\n%s", $idx, implode( "\n", $errors ) ) );
 
 			// Check no sensitive credential patterns leak in serialized JSON.
@@ -613,5 +614,86 @@ class MigrationPlanUnitTest extends TestCase {
 			$this->assertStringNotContainsString( 'NONCE_KEY', $json_str );
 			$this->assertStringNotContainsString( 'AUTH_KEY', $json_str );
 		}
+	}
+
+	/**
+	 * Negative-control tests verifying that JsonSchemaValidator rejects mismatched types
+	 * and nested empty arrays where objects are required (and vice versa).
+	 */
+	public function test_json_schema_validator_rejects_type_mismatches_and_array_object_confusion() {
+		$schema = array(
+			'type'       => 'object',
+			'required'   => array( 'empty_obj', 'empty_arr', 'str_val' ),
+			'properties' => array(
+				'empty_obj' => array(
+					'type'          => 'object',
+					'maxProperties' => 0,
+				),
+				'empty_arr' => array(
+					'type'  => 'array',
+					'items' => array( 'type' => 'string' ),
+				),
+				'str_val'   => array(
+					'type' => 'string',
+				),
+			),
+		);
+
+		// Valid payload: empty_obj is {}, empty_arr is [], str_val is string.
+		$valid_json = '{"empty_obj":{},"empty_arr":[],"str_val":"ok"}';
+		$valid_data = json_decode( $valid_json );
+		$this->assertEmpty( JsonSchemaValidator::validate( $valid_data, $schema ) );
+
+		// Negative control 1: empty_obj is [] instead of {}.
+		$invalid_json1 = '{"empty_obj":[],"empty_arr":[],"str_val":"ok"}';
+		$invalid_data1 = json_decode( $invalid_json1 );
+		$errors1       = JsonSchemaValidator::validate( $invalid_data1, $schema );
+		$this->assertNotEmpty( $errors1 );
+		$this->assertStringContainsString( '$.empty_obj: expected type [object], got array', implode( '; ', $errors1 ) );
+
+		// Negative control 2: empty_arr is {} instead of [].
+		$invalid_json2 = '{"empty_obj":{},"empty_arr":{},"str_val":"ok"}';
+		$invalid_data2 = json_decode( $invalid_json2 );
+		$errors2       = JsonSchemaValidator::validate( $invalid_data2, $schema );
+		$this->assertNotEmpty( $errors2 );
+		$this->assertStringContainsString( '$.empty_arr: expected type [array], got object', implode( '; ', $errors2 ) );
+
+		// Negative control 3: nested [] in unauthorized plan structure (tables, dependencies, source_topology).
+		$canonical_schema_path = dirname( __DIR__ ) . '/schemas/migration-plan.json';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		$canonical_schema = json_decode( (string) file_get_contents( $canonical_schema_path ), true );
+
+		$finding_unauth    = new PreflightFinding( 'SC_AUTH_FORBIDDEN', PreflightFinding::SEVERITY_BLOCKER, 'Lacks capability.' );
+		$preflight_unauth  = new PreflightReport(
+			MigrationMode::SUBSITE_TO_STANDALONE,
+			1,
+			PreflightReport::STATUS_UNAUTHORIZED,
+			false,
+			array(
+				'expected_type'       => 'standalone',
+				'verification_status' => 'unverified',
+			),
+			null,
+			array( $finding_unauth )
+		);
+		$valid_unauth_plan = new MigrationPlan(
+			MigrationMode::SUBSITE_TO_STANDALONE,
+			1,
+			'draft',
+			array(),
+			array(),
+			$preflight_unauth,
+			array()
+		);
+
+		$valid_unauth_json = (string) wp_json_encode( $valid_unauth_plan );
+		$this->assertEmpty( JsonSchemaValidator::validate( json_decode( $valid_unauth_json ), $canonical_schema ) );
+
+		// Injected regression: replace "tables":{} with "tables":[] in serialized JSON.
+		$mutated_unauth_json = str_replace( '"tables":{}', '"tables":[]', $valid_unauth_json );
+		$this->assertNotSame( $valid_unauth_json, $mutated_unauth_json );
+		$errors_mutated = JsonSchemaValidator::validate( json_decode( $mutated_unauth_json ), $canonical_schema );
+		$this->assertNotEmpty( $errors_mutated, 'Nested empty array [] for tables must fail canonical schema expecting object {}.' );
+		$this->assertStringContainsString( '$.tables: expected type [object], got array', implode( '; ', $errors_mutated ) );
 	}
 }
