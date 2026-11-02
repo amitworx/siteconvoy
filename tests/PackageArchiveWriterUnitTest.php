@@ -10,6 +10,8 @@
 
 namespace SiteConvoy\Tests;
 
+require_once dirname( __DIR__ ) . '/siteconvoy.php';
+
 use PHPUnit\Framework\TestCase;
 use SiteConvoy\Contracts\MigrationMode;
 use SiteConvoy\Package\PackageManifest;
@@ -95,10 +97,29 @@ class PackageArchiveWriterUnitTest extends TestCase {
 	}
 
 	/**
+	 * Helper: Create a test writer instance simulating POSIX environment for portable unit testing.
+	 *
+	 * @param int $chunk_size Chunk size.
+	 * @return PackageArchiveWriter
+	 */
+	private function create_writer( $chunk_size = PackageArchiveWriter::DEFAULT_CHUNK_SIZE ) {
+		return new class( $chunk_size ) extends PackageArchiveWriter {
+			/**
+			 * Simulate POSIX environment.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
+		};
+	}
+
+	/**
 	 * Test class exists and can be instantiated.
 	 */
 	public function test_writer_instantiation() {
-		$writer = new PackageArchiveWriter();
+		$writer = $this->create_writer();
 		$this->assertInstanceOf( PackageArchiveWriter::class, $writer );
 	}
 
@@ -150,7 +171,7 @@ class PackageArchiveWriterUnitTest extends TestCase {
 		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'package.zip';
 		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'staging';
 
-		$writer = new PackageArchiveWriter();
+		$writer = $this->create_writer();
 		$result = $writer->write( $manifest, $streams, $output_path, $staging_dir );
 
 		$this->assertInstanceOf( PackageArchiveWriterResult::class, $result );
@@ -226,7 +247,7 @@ class PackageArchiveWriterUnitTest extends TestCase {
 			),
 		);
 
-		$writer = new PackageArchiveWriter();
+		$writer = $this->create_writer();
 
 		foreach ( $modes as $mode => $source ) {
 			$content  = "DUMP FOR MODE {$mode}";
@@ -285,7 +306,7 @@ class PackageArchiveWriterUnitTest extends TestCase {
 			'base_prefix'  => 'wp_',
 		);
 
-		$writer = new PackageArchiveWriter();
+		$writer = $this->create_writer();
 
 		$m1 = new PackageManifest( MigrationMode::STANDALONE_TO_SUBSITE, $source, $entries );
 		$s1 = array(
@@ -356,7 +377,7 @@ class PackageArchiveWriterUnitTest extends TestCase {
 
 		$mem_before = memory_get_usage();
 
-		$writer = new PackageArchiveWriter( 65536 );
+		$writer = $this->create_writer( 65536 );
 		$res    = $writer->write( $manifest, array( 'database/large_dump.sql' => $stream ), $pkg_path, $stg_path );
 
 		$mem_after = memory_get_usage();
@@ -400,7 +421,7 @@ class PackageArchiveWriterUnitTest extends TestCase {
 			$entries
 		);
 
-		$writer = new PackageArchiveWriter();
+		$writer = $this->create_writer();
 		$res    = $writer->write(
 			$manifest,
 			array( 'assets/file.txt' => $this->create_stream( 'test' ) ),
@@ -441,7 +462,7 @@ class PackageArchiveWriterUnitTest extends TestCase {
 		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'corrupt.zip';
 		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'corrupt_stg';
 
-		$writer = new PackageArchiveWriter();
+		$writer = $this->create_writer();
 		$res    = $writer->write(
 			$manifest,
 			array( 'database/dump.sql' => $this->create_stream( $content ) ),
@@ -480,7 +501,7 @@ class PackageArchiveWriterUnitTest extends TestCase {
 		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'short.zip';
 		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'short_stg';
 
-		$writer = new PackageArchiveWriter();
+		$writer = $this->create_writer();
 		$res    = $writer->write(
 			$manifest,
 			array( 'database/dump.sql' => $this->create_stream( 'hello' ) ),
@@ -519,7 +540,7 @@ class PackageArchiveWriterUnitTest extends TestCase {
 		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'missing.zip';
 		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'missing_stg';
 
-		$writer = new PackageArchiveWriter();
+		$writer = $this->create_writer();
 		$res    = $writer->write(
 			$manifest,
 			array(), // Empty stream map.
@@ -556,7 +577,7 @@ class PackageArchiveWriterUnitTest extends TestCase {
 		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'extra.zip';
 		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'extra_stg';
 
-		$writer = new PackageArchiveWriter();
+		$writer = $this->create_writer();
 		$res    = $writer->write(
 			$manifest,
 			array(
@@ -603,7 +624,7 @@ class PackageArchiveWriterUnitTest extends TestCase {
 		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'dup.zip';
 		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'dup_stg';
 
-		$writer = new PackageArchiveWriter();
+		$writer = $this->create_writer();
 		$res    = $writer->write(
 			$manifest,
 			array(
@@ -644,7 +665,7 @@ class PackageArchiveWriterUnitTest extends TestCase {
 			$entries
 		);
 
-		$writer = new PackageArchiveWriter();
+		$writer = $this->create_writer();
 		$res    = $writer->write(
 			$manifest,
 			array( 'database/dump.sql' => $write_only ),
@@ -683,7 +704,7 @@ class PackageArchiveWriterUnitTest extends TestCase {
 			$entries
 		);
 
-		$writer = new PackageArchiveWriter();
+		$writer = $this->create_writer();
 		$res    = $writer->write(
 			$manifest,
 			array( 'database/dump.sql' => $s1 ),
@@ -704,6 +725,14 @@ class PackageArchiveWriterUnitTest extends TestCase {
 	public function test_rejection_of_symlink_member_before_publication() {
 		// Create a test writer subclass that injects a symlink into the temp zip before close.
 		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Simulate POSIX environment.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
 			/**
 			 * Hook before closing zip to inject a symlink attribute.
 			 *
@@ -754,6 +783,14 @@ class PackageArchiveWriterUnitTest extends TestCase {
 	public function test_rejection_of_unexpected_member_before_publication() {
 		$writer = new class() extends PackageArchiveWriter {
 			/**
+			 * Simulate POSIX environment.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
+			/**
 			 * Hook before closing zip to inject an unexpected member.
 			 *
 			 * @param ZipArchive $zip Zip archive instance.
@@ -803,6 +840,14 @@ class PackageArchiveWriterUnitTest extends TestCase {
 	public function test_rejection_of_directory_member_before_publication() {
 		$writer = new class() extends PackageArchiveWriter {
 			/**
+			 * Simulate POSIX environment.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
+			/**
 			 * Hook before closing zip to inject a directory member.
 			 *
 			 * @param ZipArchive $zip Zip archive instance.
@@ -850,6 +895,14 @@ class PackageArchiveWriterUnitTest extends TestCase {
 	 */
 	public function test_zip_close_failure_simulation() {
 		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Simulate POSIX environment.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
 			/**
 			 * Simulate zip close failure.
 			 *
@@ -926,7 +979,7 @@ class PackageArchiveWriterUnitTest extends TestCase {
 		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'unicode.zip';
 		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'unicode_stg';
 
-		$writer = new PackageArchiveWriter();
+		$writer = $this->create_writer();
 		$res    = $writer->write(
 			$manifest,
 			array( $unicode_path => $this->create_stream( $content ) ),
@@ -948,6 +1001,14 @@ class PackageArchiveWriterUnitTest extends TestCase {
 	 */
 	public function test_ziparchive_unavailable_safe_handling() {
 		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Simulate POSIX environment.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
 			/**
 			 * Simulate unavailable zip extension.
 			 *
@@ -1028,7 +1089,7 @@ class PackageArchiveWriterUnitTest extends TestCase {
 		);
 
 		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'success.zip';
-		$writer      = new PackageArchiveWriter();
+		$writer      = $this->create_writer();
 
 		// 1. Success case.
 		$res = $writer->write(
@@ -1070,6 +1131,14 @@ class PackageArchiveWriterUnitTest extends TestCase {
 
 		// Subclass writer that creates a destination file right before finalize/publish.
 		$writer = new class( $output_path ) extends PackageArchiveWriter {
+			/**
+			 * Simulate POSIX environment.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
 			/**
 			 * Target output destination file.
 			 *
@@ -1134,6 +1203,14 @@ class PackageArchiveWriterUnitTest extends TestCase {
 	 */
 	public function test_finalized_zip_manifest_modification_rejected() {
 		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Simulate POSIX environment.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
 			/**
 			 * Hook before close zip to inject an altered manifest.json.
 			 *
@@ -1230,7 +1307,7 @@ class PackageArchiveWriterUnitTest extends TestCase {
 			$entries
 		);
 
-		$writer = new PackageArchiveWriter();
+		$writer = $this->create_writer();
 		$res    = $writer->write(
 			$manifest,
 			array( 'assets/empty.txt' => $this->create_stream( '' ) ),
@@ -1248,6 +1325,14 @@ class PackageArchiveWriterUnitTest extends TestCase {
 	 */
 	public function test_manifest_exceeding_size_limit_rejected() {
 		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Simulate POSIX environment.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
 			/**
 			 * Hook before close zip to inject an oversized manifest.json.
 			 *
@@ -1298,6 +1383,14 @@ class PackageArchiveWriterUnitTest extends TestCase {
 	 */
 	public function test_atomic_publication_failure_simulation() {
 		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Simulate POSIX environment.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
 			/**
 			 * Override publish primitive to simulate atomic publication failure.
 			 *
@@ -1353,6 +1446,14 @@ class PackageArchiveWriterUnitTest extends TestCase {
 	public function test_random_bytes_failure_does_not_orphan_directory() {
 		// Test random failure on second nonce (temp archive name after op directory created).
 		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Simulate POSIX environment.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
 			/**
 			 * Call count counter.
 			 *
@@ -1422,6 +1523,14 @@ class PackageArchiveWriterUnitTest extends TestCase {
 	public function test_zip_metadata_failure_blocks_publication() {
 		$writer = new class() extends PackageArchiveWriter {
 			/**
+			 * Simulate POSIX environment.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
+			/**
 			 * Simulate metadata operation failure on zip member.
 			 *
 			 * @param ZipArchive $zip Zip archive.
@@ -1471,6 +1580,14 @@ class PackageArchiveWriterUnitTest extends TestCase {
 	 */
 	public function test_reversed_manifest_entries_rejected_by_raw_bytes_comparison() {
 		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Simulate POSIX environment.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
 			/**
 			 * Hook before close zip to inject an embedded manifest with reversed entries.
 			 *
@@ -1550,6 +1667,14 @@ class PackageArchiveWriterUnitTest extends TestCase {
 	public function test_pre_publication_digest_failure_blocks_publication() {
 		$writer = new class() extends PackageArchiveWriter {
 			/**
+			 * Simulate POSIX environment.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
+			/**
 			 * Simulate hash failure before publication.
 			 *
 			 * @param string $algo Hash algorithm.
@@ -1597,7 +1722,7 @@ class PackageArchiveWriterUnitTest extends TestCase {
 	 * Test archive file permissions are restricted to owner-only (0600) on POSIX platforms.
 	 */
 	public function test_published_archive_has_restricted_owner_permissions() {
-		$writer = new PackageArchiveWriter();
+		$writer = $this->create_writer();
 
 		$entries  = array(
 			array(
@@ -1647,7 +1772,7 @@ class PackageArchiveWriterUnitTest extends TestCase {
 		$old_umask = umask( 0000 ); // Completely permissive umask.
 
 		try {
-			$writer = new PackageArchiveWriter();
+			$writer = $this->create_writer();
 
 			$entries  = array(
 				array(
@@ -1691,6 +1816,14 @@ class PackageArchiveWriterUnitTest extends TestCase {
 	 */
 	public function test_archive_permissions_enforcement_failure_blocks_publication() {
 		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Simulate POSIX environment.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
 			/**
 			 * Simulate permission enforcement failure.
 			 *
@@ -1741,6 +1874,14 @@ class PackageArchiveWriterUnitTest extends TestCase {
 	public function test_final_zip_verifier_rejects_missing_or_invalid_external_attributes() {
 		$writer = new class() extends PackageArchiveWriter {
 			/**
+			 * Simulate POSIX environment.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
+			/**
 			 * Alter member external attributes before close.
 			 *
 			 * @param ZipArchive $zip ZipArchive instance.
@@ -1789,6 +1930,14 @@ class PackageArchiveWriterUnitTest extends TestCase {
 	 */
 	public function test_final_zip_verifier_rejects_missing_external_attributes_lookup() {
 		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Simulate POSIX environment.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
 			/**
 			 * Simulate lookup failure for member external attributes.
 			 *
@@ -1841,6 +1990,14 @@ class PackageArchiveWriterUnitTest extends TestCase {
 	public function test_final_zip_verifier_rejects_tampered_member_timestamp() {
 		$writer = new class() extends PackageArchiveWriter {
 			/**
+			 * Simulate POSIX environment.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
+			/**
 			 * Alter member timestamp before close.
 			 *
 			 * @param ZipArchive $zip ZipArchive instance.
@@ -1888,6 +2045,14 @@ class PackageArchiveWriterUnitTest extends TestCase {
 	 */
 	public function test_final_zip_verifier_rejects_tampered_member_compression() {
 		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Simulate POSIX environment.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
 			/**
 			 * Alter member compression before close.
 			 *
@@ -1937,6 +2102,14 @@ class PackageArchiveWriterUnitTest extends TestCase {
 	public function test_setting_external_attributes_failure_blocks_publication() {
 		$writer = new class() extends PackageArchiveWriter {
 			/**
+			 * Simulate POSIX environment.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
+			/**
 			 * Simulate failure to set external attributes.
 			 *
 			 * @param ZipArchive $zip Zip instance.
@@ -1980,5 +2153,150 @@ class PackageArchiveWriterUnitTest extends TestCase {
 		$this->assertFalse( $res->is_success() );
 		$this->assertSame( 'ZIP_SET_METADATA_FAILED', $res->get_errors()[0]['code'] );
 		$this->assertFileDoesNotExist( $output_path );
+	}
+
+	/**
+	 * Test Windows platform fail-closed policy returns SECURE_FILESYSTEM_PERMISSIONS_UNAVAILABLE.
+	 */
+	public function test_windows_platform_fails_closed_before_staging_or_publication() {
+		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Simulate Windows platform.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return true;
+			}
+		};
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/test.txt',
+				'size'   => 4,
+				'sha256' => hash( 'sha256', 'test' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'win_fail.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'win_fail_stg';
+		$stream      = $this->create_stream( 'test' );
+
+		$res = $writer->write(
+			$manifest,
+			array( 'assets/test.txt' => $stream ),
+			$output_path,
+			$staging_dir,
+			true
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'SECURE_FILESYSTEM_PERMISSIONS_UNAVAILABLE', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+		$this->assertFileDoesNotExist( $staging_dir );
+		$this->assertFalse( is_resource( $stream ), 'Streams must be closed when close_streams is true.' );
+	}
+
+	/**
+	 * Test Windows platform failure preserves caller stream when close_streams is false.
+	 */
+	public function test_windows_platform_failure_preserves_stream_when_close_streams_false() {
+		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Simulate Windows platform.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return true;
+			}
+		};
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/test.txt',
+				'size'   => 4,
+				'sha256' => hash( 'sha256', 'test' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'win_fail_no_close.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'win_fail_no_close_stg';
+		$stream      = $this->create_stream( 'test' );
+
+		$res = $writer->write(
+			$manifest,
+			array( 'assets/test.txt' => $stream ),
+			$output_path,
+			$staging_dir,
+			false
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'SECURE_FILESYSTEM_PERMISSIONS_UNAVAILABLE', $res->get_errors()[0]['code'] );
+		$this->assertTrue( is_resource( $stream ), 'Streams must be preserved when close_streams is false.' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+		fclose( $stream );
+	}
+
+	/**
+	 * Test real runtime host behavior on Windows fails closed without seam.
+	 */
+	public function test_real_windows_host_fails_closed_when_running_on_windows() {
+		if ( 'WIN' !== strtoupper( substr( PHP_OS, 0, 3 ) ) ) {
+			$this->markTestSkipped( 'Test runs only on genuine Windows hosts.' );
+		}
+
+		$writer = new PackageArchiveWriter();
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/test.txt',
+				'size'   => 4,
+				'sha256' => hash( 'sha256', 'test' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'real_win.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'real_win_stg';
+
+		$res = $writer->write(
+			$manifest,
+			array( 'assets/test.txt' => $this->create_stream( 'test' ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'SECURE_FILESYSTEM_PERMISSIONS_UNAVAILABLE', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+		$this->assertFileDoesNotExist( $staging_dir );
 	}
 }

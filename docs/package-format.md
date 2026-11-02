@@ -126,10 +126,12 @@ Entries in `PackageManifest` are sorted canonically by `path` using standard byt
    - Fixed epoch mtime (`1767225600`, representing `2026-01-01 00:00:00 UTC`) is assigned to every member via `setMtimeName()`.
    - Fixed compression method (`ZipArchive::CM_STORE`) is enforced via `setCompressionName()` to guarantee reproducible, bit-for-bit identical ZIP archives across platforms regardless of zlib compression variations.
    - Deterministic UNIX regular-file external attributes (`0100644 << 16` / `020151000000`) are explicitly normalized across all members via `setExternalAttributesName()`.
-4. **Safe Staging, Restricted Permissions & Workspace Directory**:
+4. **Safe Staging, Restricted Permissions & Platform Containment**:
    - Requires an explicit, private temporary staging parent directory (`0700`).
    - The writer never recursively deletes caller workspaces. It allocates an exclusive, randomly named per-operation subdirectory (`0700`, `sc_op_<nonce>`).
-   - Restrictive file permissions (`0600`, owner read/write only) are explicitly enforced on temporary ZIP archives before publication and re-enforced at the published destination. On POSIX environments, `0600` is verified via `fileperms()` preventing exposure under permissive umasks. On Windows/NTFS, permissions enforcement relies on directory inheritance and system ACLs.
+   - **Supported Platform Policy (Fail-Closed on Windows)**:
+     - **POSIX / Linux Hosts**: Fully supported. Restrictive file permissions (`0600`, owner read/write only) are explicitly enforced on temporary ZIP archives before publication and re-enforced at the published destination. Permissions are strictly verified via `fileperms()`, preventing data exposure under permissive process umasks.
+     - **Windows Hosts**: Explicitly fail closed with structured error `SECURE_FILESYSTEM_PERMISSIONS_UNAVAILABLE` before staging directories are created or payloads are written. Because Windows `chmod` controls only the read-only file attribute and cannot verify or enforce fine-grained NTFS Access Control Lists (ACLs), package writer operations are disabled on Windows environments until verified ACL enforcement is implemented.
    - Staging files use opaque random names (`stg_<nonce>.tmp`) &mdash; never derived from manifest relative paths &mdash; eliminating symlink-following and traversal risks within the staging workspace.
    - Symlinks for output destination, staging parent, and any of their ancestor directory components are strictly prohibited (`SYMLINK_PATH_PROHIBITED`).
 5. **Independent Pre-Publication Verification**:

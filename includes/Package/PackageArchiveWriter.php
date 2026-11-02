@@ -79,7 +79,18 @@ class PackageArchiveWriter {
 	 * @return PackageArchiveWriterResult Outcome.
 	 */
 	public function write( PackageManifest $manifest, array $stream_map, $output_path, $staging_dir, $close_streams = true ) {
-		// 1. Check runtime capability: ZipArchive must exist.
+		// 1. Check runtime platform security: Windows hosts cannot currently enforce verified NTFS ACL privacy.
+		if ( $this->is_windows_platform() ) {
+			if ( $close_streams ) {
+				$this->close_stream_map( $stream_map );
+			}
+			return PackageArchiveWriterResult::failure(
+				'SECURE_FILESYSTEM_PERMISSIONS_UNAVAILABLE',
+				'Package archive creation is unavailable on Windows environments due to unverified NTFS access control lists.'
+			);
+		}
+
+		// 2. Check runtime capability: ZipArchive must exist.
 		if ( ! $this->is_zip_available() ) {
 			if ( $close_streams ) {
 				$this->close_stream_map( $stream_map );
@@ -90,7 +101,7 @@ class PackageArchiveWriter {
 			);
 		}
 
-		// 2. Validate output path.
+		// 3. Validate output path.
 		if ( ! is_string( $output_path ) || '' === trim( $output_path ) ) {
 			if ( $close_streams ) {
 				$this->close_stream_map( $stream_map );
@@ -147,7 +158,7 @@ class PackageArchiveWriter {
 			);
 		}
 
-		// 3. Validate staging directory.
+		// 4. Validate staging directory.
 		if ( ! is_string( $staging_dir ) || '' === trim( $staging_dir ) ) {
 			if ( $close_streams ) {
 				$this->close_stream_map( $stream_map );
@@ -1075,6 +1086,15 @@ class PackageArchiveWriter {
 	 */
 	protected function compute_archive_hash( $algo, $path ) {
 		return hash_file( $algo, $path );
+	}
+
+	/**
+	 * Check whether current runtime platform is Windows (test seam).
+	 *
+	 * @return bool True if running on Windows.
+	 */
+	protected function is_windows_platform() {
+		return 'WIN' === strtoupper( substr( PHP_OS, 0, 3 ) );
 	}
 
 	/**
