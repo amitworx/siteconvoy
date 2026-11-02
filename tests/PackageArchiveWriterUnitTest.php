@@ -1592,4 +1592,393 @@ class PackageArchiveWriterUnitTest extends TestCase {
 		$this->assertSame( 'ARCHIVE_DIGEST_FAILED', $res->get_errors()[0]['code'] );
 		$this->assertFileDoesNotExist( $output_path );
 	}
+
+	/**
+	 * Test archive file permissions are restricted to owner-only (0600) on POSIX platforms.
+	 */
+	public function test_published_archive_has_restricted_owner_permissions() {
+		$writer = new PackageArchiveWriter();
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/secure.txt',
+				'size'   => 5,
+				'sha256' => hash( 'sha256', 'hello' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'perms.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'perms_stg';
+
+		$res = $writer->write(
+			$manifest,
+			array( 'assets/secure.txt' => $this->create_stream( 'hello' ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertTrue( $res->is_success() );
+		$this->assertFileExists( $output_path );
+
+		if ( 'WIN' !== strtoupper( substr( PHP_OS, 0, 3 ) ) ) {
+			// On POSIX, assert permissions are strictly 0600.
+			$perms = fileperms( $output_path ) & 0777;
+			$this->assertSame( 0600, $perms, sprintf( 'Expected 0600 permissions, got %o', $perms ) );
+		}
+	}
+
+	/**
+	 * Test that permissive process umask does not cause published archive to have permissive permissions on POSIX.
+	 */
+	public function test_permissive_umask_does_not_compromise_archive_permissions() {
+		if ( 'WIN' === strtoupper( substr( PHP_OS, 0, 3 ) ) || ! function_exists( 'umask' ) ) {
+			$this->markTestSkipped( 'umask test requires POSIX environment.' );
+		}
+
+		$old_umask = umask( 0000 ); // Completely permissive umask.
+
+		try {
+			$writer = new PackageArchiveWriter();
+
+			$entries  = array(
+				array(
+					'path'   => 'assets/secure.txt',
+					'size'   => 5,
+					'sha256' => hash( 'sha256', 'hello' ),
+				),
+			);
+			$manifest = new PackageManifest(
+				MigrationMode::STANDALONE_TO_SUBSITE,
+				array(
+					'is_multisite' => false,
+					'site_id'      => 1,
+					'base_prefix'  => 'wp_',
+				),
+				$entries
+			);
+
+			$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'umask_perms.zip';
+			$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'umask_perms_stg';
+
+			$res = $writer->write(
+				$manifest,
+				array( 'assets/secure.txt' => $this->create_stream( 'hello' ) ),
+				$output_path,
+				$staging_dir
+			);
+
+			$this->assertTrue( $res->is_success() );
+			$this->assertFileExists( $output_path );
+
+			$perms = fileperms( $output_path ) & 0777;
+			$this->assertSame( 0600, $perms, sprintf( 'Archive must strictly have 0600 permissions even under 0000 umask, got %o', $perms ) );
+		} finally {
+			umask( $old_umask );
+		}
+	}
+
+	/**
+	 * Test failure to enforce archive permissions blocks publication.
+	 */
+	public function test_archive_permissions_enforcement_failure_blocks_publication() {
+		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Simulate permission enforcement failure.
+			 *
+			 * @param string $path File path.
+			 * @param int    $mode Mode.
+			 * @return bool
+			 */
+			protected function enforce_file_permissions( $path, $mode ) {
+				return false;
+			}
+		};
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/secure.txt',
+				'size'   => 5,
+				'sha256' => hash( 'sha256', 'hello' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'perm_fail.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'perm_fail_stg';
+
+		$res = $writer->write(
+			$manifest,
+			array( 'assets/secure.txt' => $this->create_stream( 'hello' ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'ARCHIVE_PERMISSIONS_FAILED', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+	}
+
+	/**
+	 * Test pre-publication verifier rejects archive if member external attributes are missing or non-regular.
+	 */
+	public function test_final_zip_verifier_rejects_missing_or_invalid_external_attributes() {
+		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Alter member external attributes before close.
+			 *
+			 * @param ZipArchive $zip ZipArchive instance.
+			 * @param string     $temp_archive_path Temp archive path.
+			 */
+			protected function before_close_zip( ZipArchive $zip, $temp_archive_path ) {
+				// Corrupt external attributes for manifest.json: set directory attribute instead of regular file.
+				$zip->setExternalAttributesName( 'manifest.json', ZipArchive::OPSYS_UNIX, 0040755 << 16 );
+			}
+		};
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/test.txt',
+				'size'   => 4,
+				'sha256' => hash( 'sha256', 'test' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'bad_attr.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'bad_attr_stg';
+
+		$res = $writer->write(
+			$manifest,
+			array( 'assets/test.txt' => $this->create_stream( 'test' ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'ZIP_NONREGULAR_MEMBER_PROHIBITED', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+	}
+
+	/**
+	 * Test pre-publication verifier rejects archive if member external attributes cannot be determined or are missing.
+	 */
+	public function test_final_zip_verifier_rejects_missing_external_attributes_lookup() {
+		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Simulate lookup failure for member external attributes.
+			 *
+			 * @param ZipArchive $zip Zip instance.
+			 * @param int        $index Member index.
+			 * @param int        $opsys Target OS.
+			 * @param int        $attr Target attributes.
+			 * @return bool
+			 */
+			protected function get_member_external_attributes( ZipArchive $zip, $index, &$opsys, &$attr ) {
+				return false;
+			}
+		};
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/test.txt',
+				'size'   => 4,
+				'sha256' => hash( 'sha256', 'test' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'no_attr.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'no_attr_stg';
+
+		$res = $writer->write(
+			$manifest,
+			array( 'assets/test.txt' => $this->create_stream( 'test' ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'ZIP_STAT_FAILED', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+	}
+
+	/**
+	 * Test pre-publication verifier rejects archive if member timestamp was tampered or corrupted.
+	 */
+	public function test_final_zip_verifier_rejects_tampered_member_timestamp() {
+		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Alter member timestamp before close.
+			 *
+			 * @param ZipArchive $zip ZipArchive instance.
+			 * @param string     $temp_archive_path Temp archive path.
+			 */
+			protected function before_close_zip( ZipArchive $zip, $temp_archive_path ) {
+				$zip->setMtimeName( 'manifest.json', 1234567890 );
+			}
+		};
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/test.txt',
+				'size'   => 4,
+				'sha256' => hash( 'sha256', 'test' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'bad_mtime.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'bad_mtime_stg';
+
+		$res = $writer->write(
+			$manifest,
+			array( 'assets/test.txt' => $this->create_stream( 'test' ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'ZIP_MEMBER_METADATA_MISMATCH', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+	}
+
+	/**
+	 * Test pre-publication verifier rejects archive if member compression method was tampered or corrupted.
+	 */
+	public function test_final_zip_verifier_rejects_tampered_member_compression() {
+		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Alter member compression before close.
+			 *
+			 * @param ZipArchive $zip ZipArchive instance.
+			 * @param string     $temp_archive_path Temp archive path.
+			 */
+			protected function before_close_zip( ZipArchive $zip, $temp_archive_path ) {
+				$zip->setCompressionName( 'manifest.json', ZipArchive::CM_DEFLATE );
+			}
+		};
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/test.txt',
+				'size'   => 4,
+				'sha256' => hash( 'sha256', 'test' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'bad_comp.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'bad_comp_stg';
+
+		$res = $writer->write(
+			$manifest,
+			array( 'assets/test.txt' => $this->create_stream( 'test' ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'ZIP_MEMBER_METADATA_MISMATCH', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+	}
+
+	/**
+	 * Test setting external attributes failure blocks publication.
+	 */
+	public function test_setting_external_attributes_failure_blocks_publication() {
+		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Simulate failure to set external attributes.
+			 *
+			 * @param ZipArchive $zip Zip instance.
+			 * @param string     $name Member name.
+			 * @param int        $opsys OS system.
+			 * @param int        $attr External attributes.
+			 * @return bool
+			 */
+			protected function set_member_external_attributes( ZipArchive $zip, $name, $opsys, $attr ) {
+				return false;
+			}
+		};
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/test.txt',
+				'size'   => 4,
+				'sha256' => hash( 'sha256', 'test' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'ext_attr_fail.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'ext_attr_fail_stg';
+
+		$res = $writer->write(
+			$manifest,
+			array( 'assets/test.txt' => $this->create_stream( 'test' ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'ZIP_SET_METADATA_FAILED', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+	}
 }

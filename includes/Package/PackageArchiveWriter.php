@@ -46,6 +46,13 @@ class PackageArchiveWriter {
 	const MAX_MANIFEST_SIZE = 2097152;
 
 	/**
+	 * Canonical UNIX external attribute for regular files (0100644 << 16).
+	 *
+	 * @var int
+	 */
+	const DETERMINISTIC_REGULAR_FILE_ATTR = 020151000000;
+
+	/**
 	 * Chunk size in bytes.
 	 *
 	 * @var int
@@ -490,6 +497,13 @@ class PackageArchiveWriter {
 							'Failed to set stored compression mode for manifest.json.'
 						);
 					}
+					if ( ! $this->set_member_external_attributes( $zip, 'manifest.json', ZipArchive::OPSYS_UNIX, self::DETERMINISTIC_REGULAR_FILE_ATTR ) ) {
+						$zip->close();
+						return PackageArchiveWriterResult::failure(
+							'ZIP_SET_METADATA_FAILED',
+							'Failed to set external attributes for manifest.json.'
+						);
+					}
 				} else {
 					$staged_file = $staged_map[ $member_name ];
 					if ( ! $zip->addFile( $staged_file, $member_name ) ) {
@@ -513,6 +527,13 @@ class PackageArchiveWriter {
 							'Failed to set stored compression mode for entry member.'
 						);
 					}
+					if ( ! $this->set_member_external_attributes( $zip, $member_name, ZipArchive::OPSYS_UNIX, self::DETERMINISTIC_REGULAR_FILE_ATTR ) ) {
+						$zip->close();
+						return PackageArchiveWriterResult::failure(
+							'ZIP_SET_METADATA_FAILED',
+							'Failed to set external attributes for entry member.'
+						);
+					}
 				}
 			}
 
@@ -532,6 +553,14 @@ class PackageArchiveWriter {
 				return PackageArchiveWriterResult::failure(
 					$verify_result['code'],
 					$verify_result['message']
+				);
+			}
+
+			// Enforce restrictive file permissions (0600) on temporary archive prior to publication.
+			if ( ! $this->enforce_file_permissions( $temp_archive_path, 0600 ) ) {
+				return PackageArchiveWriterResult::failure(
+					'ARCHIVE_PERMISSIONS_FAILED',
+					'Failed to enforce restrictive file permissions on finalized temporary archive.'
 				);
 			}
 
@@ -647,6 +676,18 @@ class PackageArchiveWriter {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_unlink, WordPress.WP.AlternativeFunctions.unlink_unlink, WordPress.PHP.NoSilencedErrors.Discouraged
 		@unlink( $source_path );
 
+		// Ensure published destination archive maintains restrictive permissions.
+		if ( ! $this->enforce_file_permissions( $destination_path, 0600 ) ) {
+			// Fail closed: clean up published archive to avoid leaving insecure files.
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_unlink, WordPress.WP.AlternativeFunctions.unlink_unlink, WordPress.PHP.NoSilencedErrors.Discouraged
+			@unlink( $destination_path );
+			return array(
+				'success' => false,
+				'code'    => 'ARCHIVE_PERMISSIONS_FAILED',
+				'message' => 'Failed to enforce restrictive file permissions on published destination archive.',
+			);
+		}
+
 		return array(
 			'success' => true,
 			'code'    => '',
@@ -709,6 +750,23 @@ class PackageArchiveWriter {
 
 				$name = $stat['name'];
 
+				// Verify member deterministic timestamp and compression method.
+				if ( ! isset( $stat['mtime'] ) || self::DETERMINISTIC_MTIME !== $stat['mtime'] ) {
+					return array(
+						'valid'   => false,
+						'code'    => 'ZIP_MEMBER_METADATA_MISMATCH',
+						'message' => 'Finalized ZIP member does not have deterministic timestamp.',
+					);
+				}
+
+				if ( ! isset( $stat['comp_method'] ) || ZipArchive::CM_STORE !== $stat['comp_method'] ) {
+					return array(
+						'valid'   => false,
+						'code'    => 'ZIP_MEMBER_METADATA_MISMATCH',
+						'message' => 'Finalized ZIP member is not stored without compression.',
+					);
+				}
+
 				// Reject directory entries.
 				if ( str_ends_with( $name, '/' ) ) {
 					return array(
@@ -721,24 +779,30 @@ class PackageArchiveWriter {
 				// Check external attributes for UNIX symlinks or non-regular files.
 				$opsys = 0;
 				$attr  = 0;
-				if ( $zip->getExternalAttributesIndex( $i, $opsys, $attr ) ) {
-					// High 16 bits of external attributes contain UNIX file mode.
-					$file_type = ( $attr >> 16 ) & 0170000;
-					if ( 0120000 === $file_type ) {
-						return array(
-							'valid'   => false,
-							'code'    => 'ZIP_SYMLINK_MEMBER_PROHIBITED',
-							'message' => 'Finalized ZIP must not contain symbolic link members.',
-						);
-					}
-					// Only regular files (0100000) allowed if UNIX file mode is present.
-					if ( 0 !== $file_type && 0100000 !== $file_type ) {
-						return array(
-							'valid'   => false,
-							'code'    => 'ZIP_NONREGULAR_MEMBER_PROHIBITED',
-							'message' => 'Finalized ZIP must contain only regular file members.',
-						);
-					}
+				if ( ! $this->get_member_external_attributes( $zip, $i, $opsys, $attr ) ) {
+					return array(
+						'valid'   => false,
+						'code'    => 'ZIP_STAT_FAILED',
+						'message' => 'Failed to retrieve external attributes for member in finalized ZIP.',
+					);
+				}
+
+				// High 16 bits of external attributes contain UNIX file mode.
+				$file_type = ( $attr >> 16 ) & 0170000;
+				if ( 0120000 === $file_type ) {
+					return array(
+						'valid'   => false,
+						'code'    => 'ZIP_SYMLINK_MEMBER_PROHIBITED',
+						'message' => 'Finalized ZIP must not contain symbolic link members.',
+					);
+				}
+				// Only regular files (0100000) allowed.
+				if ( 0100000 !== $file_type ) {
+					return array(
+						'valid'   => false,
+						'code'    => 'ZIP_NONREGULAR_MEMBER_PROHIBITED',
+						'message' => 'Finalized ZIP must contain only regular file members.',
+					);
 				}
 
 				if ( $name !== $expected_names[ $i ] ) {
@@ -1040,5 +1104,63 @@ class PackageArchiveWriter {
 	 */
 	protected function execute_zip_close( ZipArchive $zip ) {
 		return $zip->close();
+	}
+
+	/**
+	 * Set external attributes for member in zip (test seam).
+	 *
+	 * @param ZipArchive $zip ZipArchive instance.
+	 * @param string     $name Member name.
+	 * @param int        $opsys Target OS.
+	 * @param int        $attr External attributes.
+	 * @return bool True on success, false on failure.
+	 */
+	protected function set_member_external_attributes( ZipArchive $zip, $name, $opsys, $attr ) {
+		return $zip->setExternalAttributesName( $name, $opsys, $attr );
+	}
+
+	/**
+	 * Get external attributes for member in zip (test seam).
+	 *
+	 * @param ZipArchive $zip ZipArchive instance.
+	 * @param int        $index Member index.
+	 * @param int        $opsys Output OS.
+	 * @param int        $attr Output attributes.
+	 * @return bool True on success, false on failure.
+	 */
+	protected function get_member_external_attributes( ZipArchive $zip, $index, &$opsys, &$attr ) {
+		return $zip->getExternalAttributesIndex( $index, $opsys, $attr );
+	}
+
+	/**
+	 * Enforce restrictive file permissions on archive file (test seam).
+	 *
+	 * @param string $path Path to archive file.
+	 * @param int    $mode POSIX permission mode (e.g. 0600).
+	 * @return bool True on success, false on failure.
+	 */
+	protected function enforce_file_permissions( $path, $mode ) {
+		if ( ! file_exists( $path ) ) {
+			return false;
+		}
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod, WordPress.PHP.NoSilencedErrors.Discouraged
+		$chmod_res = @chmod( $path, $mode );
+		if ( ! $chmod_res ) {
+			return false;
+		}
+
+		// On non-Windows (POSIX) hosts, verify the mode was actually applied.
+		if ( 'WIN' !== strtoupper( substr( PHP_OS, 0, 3 ) ) ) {
+			// Clear stat cache to ensure fresh permissions read.
+			clearstatcache( true, $path );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fileperms
+			$actual_perms = fileperms( $path );
+			if ( false === $actual_perms || ( $actual_perms & 0777 ) !== $mode ) {
+				return false;
+			}
+		}
+
+		return true;
 	}
 }
