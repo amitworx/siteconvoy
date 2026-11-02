@@ -1346,4 +1346,250 @@ class PackageArchiveWriterUnitTest extends TestCase {
 		$this->assertFileDoesNotExist( $output_path );
 		$this->assertEmpty( glob( $staging_dir . DIRECTORY_SEPARATOR . 'sc_op_*' ), 'Staging files must be cleaned up on publish failure.' );
 	}
+
+	/**
+	 * Test random bytes failure handling and zero orphaned staging directories.
+	 */
+	public function test_random_bytes_failure_does_not_orphan_directory() {
+		// Test random failure on second nonce (temp archive name after op directory created).
+		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Call count counter.
+			 *
+			 * @var int
+			 */
+			private $call_count = 0;
+
+			/**
+			 * Simulate random failure on second call.
+			 *
+			 * @param int $length Number of bytes.
+			 * @return string
+			 * @throws \Exception When simulated RNG failure occurs.
+			 */
+			protected function generate_random_bytes( $length ) {
+				++$this->call_count;
+				if ( 2 === $this->call_count ) {
+					throw new \Exception( 'Simulated RNG failure.' );
+				}
+				return parent::generate_random_bytes( $length );
+			}
+		};
+
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'rng_fail_stg';
+		// Prepopulate sentinel to verify caller workspace preserved.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
+		mkdir( $staging_dir, 0700, true );
+		$sentinel = $staging_dir . DIRECTORY_SEPARATOR . 'sentinel.txt';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+		file_put_contents( $sentinel, 'CALLER_SENTINEL' );
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/empty.txt',
+				'size'   => 0,
+				'sha256' => hash( 'sha256', '' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'rng_fail.zip';
+		$res         = $writer->write(
+			$manifest,
+			array( 'assets/empty.txt' => $this->create_stream( '' ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'RANDOM_BYTES_FAILED', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+		$this->assertFileExists( $sentinel );
+		$this->assertEmpty( glob( $staging_dir . DIRECTORY_SEPARATOR . 'sc_op_*' ), 'Operation subdirectory must be removed on RNG failure.' );
+	}
+
+	/**
+	 * Test failure when setMtimeName or setCompressionName fails on archive member.
+	 */
+	public function test_zip_metadata_failure_blocks_publication() {
+		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Simulate metadata operation failure on zip member.
+			 *
+			 * @param ZipArchive $zip Zip archive.
+			 * @param string     $name Member name.
+			 * @param int        $method Compression method.
+			 * @return bool
+			 */
+			protected function set_member_compression( ZipArchive $zip, $name, $method ) {
+				return false;
+			}
+		};
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/empty.txt',
+				'size'   => 0,
+				'sha256' => hash( 'sha256', '' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'meta_fail.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'meta_stg';
+
+		$res = $writer->write(
+			$manifest,
+			array( 'assets/empty.txt' => $this->create_stream( '' ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'ZIP_SET_METADATA_FAILED', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+	}
+
+	/**
+	 * Test that tampered manifest with reversed entry order is rejected byte-for-byte.
+	 */
+	public function test_reversed_manifest_entries_rejected_by_raw_bytes_comparison() {
+		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Hook before close zip to inject an embedded manifest with reversed entries.
+			 *
+			 * @param ZipArchive $zip Zip instance.
+			 * @param string     $temp_archive_path Temporary archive path.
+			 */
+			protected function before_close_zip( ZipArchive $zip, $temp_archive_path ) {
+				// Reverse the entries array.
+				$tampered = array(
+					'format_version' => '1.0',
+					'mode'           => MigrationMode::STANDALONE_TO_SUBSITE,
+					'source'         => array(
+						'is_multisite' => false,
+						'site_id'      => 1,
+						'base_prefix'  => 'wp_',
+					),
+					'entries'        => array(
+						array(
+							'path'   => 'database/b.sql',
+							'size'   => 0,
+							'sha256' => hash( 'sha256', '' ),
+						),
+						array(
+							'path'   => 'database/a.sql',
+							'size'   => 0,
+							'sha256' => hash( 'sha256', '' ),
+						),
+					),
+				);
+				$zip->addFromString( 'manifest.json', (string) wp_json_encode( $tampered, JSON_UNESCAPED_SLASHES ) );
+			}
+		};
+
+		$entries  = array(
+			array(
+				'path'   => 'database/a.sql',
+				'size'   => 0,
+				'sha256' => hash( 'sha256', '' ),
+			),
+			array(
+				'path'   => 'database/b.sql',
+				'size'   => 0,
+				'sha256' => hash( 'sha256', '' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'reversed_manifest.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'reversed_stg';
+
+		$res = $writer->write(
+			$manifest,
+			array(
+				'database/a.sql' => $this->create_stream( '' ),
+				'database/b.sql' => $this->create_stream( '' ),
+			),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'FINAL_MANIFEST_MISMATCH', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+	}
+
+	/**
+	 * Test pre-publication digest failure blocks archive publication.
+	 */
+	public function test_pre_publication_digest_failure_blocks_publication() {
+		$writer = new class() extends PackageArchiveWriter {
+			/**
+			 * Simulate hash failure before publication.
+			 *
+			 * @param string $algo Hash algorithm.
+			 * @param string $path File path.
+			 * @return string|false
+			 */
+			protected function compute_archive_hash( $algo, $path ) {
+				return false;
+			}
+		};
+
+		$entries  = array(
+			array(
+				'path'   => 'assets/empty.txt',
+				'size'   => 0,
+				'sha256' => hash( 'sha256', '' ),
+			),
+		);
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			$entries
+		);
+
+		$output_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'hash_fail.zip';
+		$staging_dir = $this->temp_dir . DIRECTORY_SEPARATOR . 'hash_fail_stg';
+
+		$res = $writer->write(
+			$manifest,
+			array( 'assets/empty.txt' => $this->create_stream( '' ) ),
+			$output_path,
+			$staging_dir
+		);
+
+		$this->assertFalse( $res->is_success() );
+		$this->assertSame( 'ARCHIVE_DIGEST_FAILED', $res->get_errors()[0]['code'] );
+		$this->assertFileDoesNotExist( $output_path );
+	}
 }

@@ -211,10 +211,13 @@ class PackageArchiveWriter {
 		}
 
 		// Allocate exclusive, unique restricted 0700 per-operation staging subdirectory.
-		$op_subdir = null;
+		$op_subdir         = null;
+		$temp_archive_path = null;
+		$staged_files      = array();
+
 		for ( $attempt = 0; $attempt < 5; $attempt++ ) {
 			try {
-				$candidate = $staging_dir . DIRECTORY_SEPARATOR . 'sc_op_' . bin2hex( random_bytes( 12 ) );
+				$candidate = $staging_dir . DIRECTORY_SEPARATOR . 'sc_op_' . bin2hex( $this->generate_random_bytes( 12 ) );
 			} catch ( \Exception $e ) {
 				if ( $close_streams ) {
 					$this->close_stream_map( $stream_map );
@@ -242,10 +245,16 @@ class PackageArchiveWriter {
 			);
 		}
 
-		$temp_archive_path = $op_subdir . DIRECTORY_SEPARATOR . 'sc_pkg_' . bin2hex( random_bytes( 8 ) ) . '.tmp';
-		$staged_files      = array();
-
 		try {
+			try {
+				$temp_archive_path = $op_subdir . DIRECTORY_SEPARATOR . 'sc_pkg_' . bin2hex( $this->generate_random_bytes( 8 ) ) . '.tmp';
+			} catch ( \Exception $e ) {
+				return PackageArchiveWriterResult::failure(
+					'RANDOM_BYTES_FAILED',
+					'Cryptographically secure random bytes unavailable.'
+				);
+			}
+
 			// 4. Stream verification and staging.
 			$entries        = $manifest->get_entries();
 			$manifest_paths = array();
@@ -332,8 +341,16 @@ class PackageArchiveWriter {
 				}
 
 				// Generate opaque temporary staging filename.
-				$staged_filename = 'stg_' . bin2hex( random_bytes( 12 ) ) . '.tmp';
-				$staged_path     = $op_subdir . DIRECTORY_SEPARATOR . $staged_filename;
+				try {
+					$staged_filename = 'stg_' . bin2hex( $this->generate_random_bytes( 12 ) ) . '.tmp';
+				} catch ( \Exception $e ) {
+					return PackageArchiveWriterResult::failure(
+						'RANDOM_BYTES_FAILED',
+						'Cryptographically secure random bytes unavailable.'
+					);
+				}
+
+				$staged_path = $op_subdir . DIRECTORY_SEPARATOR . $staged_filename;
 
 				// Exclusive create 'x' mode to prevent clobbering or link hijacking.
 				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen, WordPress.PHP.NoSilencedErrors.Discouraged
@@ -434,7 +451,7 @@ class PackageArchiveWriter {
 				);
 			}
 
-			// Encode and add manifest.json first.
+			// Encode manifest.json canonical bytes.
 			$manifest_json = wp_json_encode( $manifest, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
 			if ( false === $manifest_json || ! is_string( $manifest_json ) ) {
 				$zip->close();
@@ -459,8 +476,20 @@ class PackageArchiveWriter {
 							'Failed to add manifest.json member to ZIP archive.'
 						);
 					}
-					$zip->setMtimeName( 'manifest.json', self::DETERMINISTIC_MTIME );
-					$zip->setCompressionName( 'manifest.json', ZipArchive::CM_STORE );
+					if ( ! $this->set_member_mtime( $zip, 'manifest.json', self::DETERMINISTIC_MTIME ) ) {
+						$zip->close();
+						return PackageArchiveWriterResult::failure(
+							'ZIP_SET_METADATA_FAILED',
+							'Failed to set deterministic timestamp for manifest.json.'
+						);
+					}
+					if ( ! $this->set_member_compression( $zip, 'manifest.json', ZipArchive::CM_STORE ) ) {
+						$zip->close();
+						return PackageArchiveWriterResult::failure(
+							'ZIP_SET_METADATA_FAILED',
+							'Failed to set stored compression mode for manifest.json.'
+						);
+					}
 				} else {
 					$staged_file = $staged_map[ $member_name ];
 					if ( ! $zip->addFile( $staged_file, $member_name ) ) {
@@ -470,8 +499,20 @@ class PackageArchiveWriter {
 							'Failed to add entry member to ZIP archive.'
 						);
 					}
-					$zip->setMtimeName( $member_name, self::DETERMINISTIC_MTIME );
-					$zip->setCompressionName( $member_name, ZipArchive::CM_STORE );
+					if ( ! $this->set_member_mtime( $zip, $member_name, self::DETERMINISTIC_MTIME ) ) {
+						$zip->close();
+						return PackageArchiveWriterResult::failure(
+							'ZIP_SET_METADATA_FAILED',
+							'Failed to set deterministic timestamp for entry member.'
+						);
+					}
+					if ( ! $this->set_member_compression( $zip, $member_name, ZipArchive::CM_STORE ) ) {
+						$zip->close();
+						return PackageArchiveWriterResult::failure(
+							'ZIP_SET_METADATA_FAILED',
+							'Failed to set stored compression mode for entry member.'
+						);
+					}
 				}
 			}
 
@@ -494,6 +535,23 @@ class PackageArchiveWriter {
 				);
 			}
 
+			// Pre-calculate verified archive size and digest from private temp archive prior to publication.
+			$archive_size = filesize( $temp_archive_path );
+			if ( false === $archive_size || $archive_size <= 0 ) {
+				return PackageArchiveWriterResult::failure(
+					'ARCHIVE_STAT_FAILED',
+					'Failed to determine size of finalized temporary archive.'
+				);
+			}
+
+			$archive_sha256 = $this->compute_archive_hash( 'sha256', $temp_archive_path );
+			if ( false === $archive_sha256 || '' === $archive_sha256 ) {
+				return PackageArchiveWriterResult::failure(
+					'ARCHIVE_DIGEST_FAILED',
+					'Failed to compute SHA-256 digest of finalized temporary archive.'
+				);
+			}
+
 			// 7. Atomic no-clobber publication.
 			$publish_result = $this->publish_archive_no_clobber( $temp_archive_path, $output_path );
 			if ( ! $publish_result['success'] ) {
@@ -503,15 +561,12 @@ class PackageArchiveWriter {
 				);
 			}
 
-			$archive_size   = (int) filesize( $output_path );
-			$archive_sha256 = (string) hash_file( 'sha256', $output_path );
-
 			return new PackageArchiveWriterResult(
 				true,
 				$output_path,
 				count( $entries ),
-				$archive_size,
-				$archive_sha256
+				(int) $archive_size,
+				(string) $archive_sha256
 			);
 
 		} finally {
@@ -526,7 +581,7 @@ class PackageArchiveWriter {
 					@unlink( $staged_file );
 				}
 			}
-			if ( file_exists( $temp_archive_path ) || is_link( $temp_archive_path ) ) {
+			if ( null !== $temp_archive_path && ( file_exists( $temp_archive_path ) || is_link( $temp_archive_path ) ) ) {
 				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_unlink, WordPress.WP.AlternativeFunctions.unlink_unlink, WordPress.PHP.NoSilencedErrors.Discouraged
 				@unlink( $temp_archive_path );
 			}
@@ -638,6 +693,9 @@ class PackageArchiveWriter {
 				);
 			}
 
+			// Expected canonical manifest raw JSON string.
+			$expected_manifest_json = wp_json_encode( $manifest, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
+
 			// Check member names, symlink attributes, and entry sizes.
 			for ( $i = 0; $i < $num_files; $i++ ) {
 				$stat = $zip->statIndex( $i );
@@ -722,6 +780,15 @@ class PackageArchiveWriter {
 							'valid'   => false,
 							'code'    => 'MANIFEST_EXCEEDS_SIZE_LIMIT',
 							'message' => 'Embedded manifest.json exceeds maximum size limit.',
+						);
+					}
+
+					// Verify exact canonical byte-for-byte equivalence against expected manifest serialization.
+					if ( $content !== $expected_manifest_json ) {
+						return array(
+							'valid'   => false,
+							'code'    => 'FINAL_MANIFEST_MISMATCH',
+							'message' => 'Embedded manifest.json raw bytes do not match canonical manifest serialization.',
 						);
 					}
 
@@ -898,6 +965,52 @@ class PackageArchiveWriter {
 				fclose( $stream );
 			}
 		}
+	}
+
+	/**
+	 * Generate cryptographically secure random bytes (test seam).
+	 *
+	 * @param int $length Number of bytes.
+	 * @return string Random bytes.
+	 * @throws \Exception When random bytes cannot be generated.
+	 */
+	protected function generate_random_bytes( $length ) {
+		return random_bytes( $length );
+	}
+
+	/**
+	 * Set deterministic modification time for zip member (test seam).
+	 *
+	 * @param ZipArchive $zip Zip archive instance.
+	 * @param string     $name Member name.
+	 * @param int        $mtime Epoch timestamp.
+	 * @return bool True on success, false on failure.
+	 */
+	protected function set_member_mtime( ZipArchive $zip, $name, $mtime ) {
+		return $zip->setMtimeName( $name, $mtime );
+	}
+
+	/**
+	 * Set compression method for zip member (test seam).
+	 *
+	 * @param ZipArchive $zip Zip archive instance.
+	 * @param string     $name Member name.
+	 * @param int        $method Compression method.
+	 * @return bool True on success, false on failure.
+	 */
+	protected function set_member_compression( ZipArchive $zip, $name, $method ) {
+		return $zip->setCompressionName( $name, $method );
+	}
+
+	/**
+	 * Compute hash of archive file (test seam).
+	 *
+	 * @param string $algo Hash algorithm.
+	 * @param string $path File path.
+	 * @return string|false
+	 */
+	protected function compute_archive_hash( $algo, $path ) {
+		return hash_file( $algo, $path );
 	}
 
 	/**
