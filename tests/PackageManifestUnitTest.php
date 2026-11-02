@@ -614,9 +614,9 @@ class PackageManifestUnitTest extends TestCase {
 			$res_valid_unicode = PackageManifestValidator::validate_path( 'uploads/2026/01/ünicode-ö.jpg' );
 			$this->assertTrue( $res_valid_unicode['valid'], 'Valid UTF-8 path should be accepted when intl is loaded.' );
 		} else {
-			// Without intl, validate with intl=true capability mock to verify validation passes.
-			$res_valid_unicode = PackageManifestValidator::validate_path( 'uploads/2026/01/ünicode-ö.jpg', true, true );
-			$this->assertTrue( $res_valid_unicode['valid'], 'Valid UTF-8 path should be accepted when intl is mocked present.' );
+			// On hosts without intl, non-ASCII paths fail closed. Overriding to true must NOT elevate runtime support.
+			$res_override = PackageManifestValidator::validate_path( 'uploads/2026/01/ünicode-ö.jpg', true, true );
+			$this->assertFalse( $res_override['valid'], 'Passing true override when intl is absent must NOT elevate support.' );
 		}
 
 		// 2. Malformed / invalid UTF-8 byte sequences are rejected.
@@ -636,8 +636,8 @@ class PackageManifestUnitTest extends TestCase {
 			$res_composed = PackageManifestValidator::validate_path( $composed_path );
 			$this->assertTrue( $res_composed['valid'], 'Precomposed Unicode characters must be accepted.' );
 		} else {
-			$res_composed = PackageManifestValidator::validate_path( $composed_path, true, true );
-			$this->assertTrue( $res_composed['valid'], 'Precomposed Unicode characters must be accepted when intl is mocked present.' );
+			$res_composed = PackageManifestValidator::validate_path( $composed_path );
+			$this->assertFalse( $res_composed['valid'], 'Non-ASCII path must fail closed without intl.' );
 		}
 
 		// 4. Unicode case-fold collision rejection in PackageManifest (requires intl for non-ASCII path validation).
@@ -735,7 +735,11 @@ class PackageManifestUnitTest extends TestCase {
 		// Non-ASCII path with missing mbstring fails closed.
 		$res_no_mb = PackageManifestValidator::validate_path( $non_ascii_path, true, false );
 		$this->assertFalse( $res_no_mb['valid'], 'Non-ASCII paths must fail closed when mbstring is absent.' );
-		$this->assertStringContainsString( 'mbstring', $res_no_mb['error'] );
+		// When intl is also absent (on hosts lacking intl), intl fails first or mbstring fails.
+		$this->assertTrue(
+			false !== strpos( $res_no_mb['error'], 'mbstring' ) || false !== strpos( $res_no_mb['error'], 'intl' ),
+			'Expected error message referencing missing extension.'
+		);
 
 		// PackageManifest case folding when mbstring is absent: non-ASCII paths fail closed.
 		$source        = array(
@@ -767,8 +771,101 @@ class PackageManifestUnitTest extends TestCase {
 			new PackageManifest( MigrationMode::STANDALONE_TO_SUBSITE, $source, $unicode_entries, false, true );
 			$this->fail( 'Expected InvalidArgumentException for non-ASCII path in PackageManifest when mbstring is disabled.' );
 		} catch ( \InvalidArgumentException $e ) {
-			$this->assertStringContainsString( 'mbstring', $e->getMessage() );
+			// On hosts where intl is absent (e.g. local host), intl fails first during validate_entry(); on hosts with intl, mbstring fails.
+			$this->assertTrue(
+				false !== strpos( $e->getMessage(), 'mbstring' ) || false !== strpos( $e->getMessage(), 'intl' ),
+				'Expected exception referencing missing extension.'
+			);
 		}
+	}
+
+	/**
+	 * Test capability override cannot elevate runtime support when extensions are missing.
+	 */
+	public function test_capability_overrides_cannot_elevate_runtime_support() {
+		// 1. In PackageManifestValidator::validate_path(), passing true when runtime is absent must NOT enable support.
+		$is_intl_loaded = function_exists( 'normalizer_is_normalized' ) && defined( 'Normalizer::FORM_C' );
+		if ( ! $is_intl_loaded ) {
+			// On local host without intl, passing true must still fail closed.
+			$res = PackageManifestValidator::validate_path( 'uploads/café.png', true, true );
+			$this->assertFalse( $res['valid'], 'Passing true override when intl is absent must still fail closed.' );
+			$this->assertStringContainsString( 'intl', $res['error'] );
+		}
+
+		// phpcs:disable WordPress.PHP.DevelopmentFunctions.error_log_var_export
+		// phpcs:disable WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+		// phpcs:disable WordPress.PHP.DiscouragedPHPFunctions.system_calls_proc_open
+		// phpcs:disable WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+		// phpcs:disable WordPress.WP.AlternativeFunctions.unlink_unlink
+		// 2. Test in subprocess with php -n (zero extensions loaded) to guarantee both mbstring and intl are absent.
+		$script = implode(
+			"\n",
+			array(
+				'define("ABSPATH", true);',
+				'require_once ' . var_export( __DIR__ . '/../includes/Package/PackageManifestValidator.php', true ) . ';',
+				'require_once ' . var_export( __DIR__ . '/../includes/Package/PackageManifest.php', true ) . ';',
+				'require_once ' . var_export( __DIR__ . '/../includes/Contracts/MigrationMode.php', true ) . ';',
+				'use SiteConvoy\\Package\\PackageManifestValidator;',
+				'use SiteConvoy\\Package\\PackageManifest;',
+				'use SiteConvoy\\Contracts\\MigrationMode;',
+				'',
+				'// 1. ASCII paths always valid with zero extensions.',
+				'$res_ascii = PackageManifestValidator::validate_path("uploads/photo.jpg", true, true);',
+				'if (!$res_ascii["valid"]) { echo "ASCII_FAILED"; exit(1); }',
+				'',
+				'// 2. Passing true override for missing extensions must NOT elevate support (must fail closed).',
+				'$res_unicode = PackageManifestValidator::validate_path("uploads/café.png", true, true);',
+				'if ($res_unicode["valid"]) { echo "ELEVATION_SUCCEEDED_UNEXPECTEDLY"; exit(1); }',
+				'',
+				'// 3. PackageManifest constructor with non-ASCII and true override must fail closed without calling undefined functions.',
+				'try {',
+				'    $manifest = new PackageManifest(',
+				'        MigrationMode::STANDALONE_TO_SUBSITE,',
+				'        array("is_multisite" => false, "site_id" => 1, "base_prefix" => "wp_"),',
+				'        array(array("path" => "uploads/café.png", "size" => 10, "sha256" => str_repeat("a", 64))),',
+				'        true,',
+				'        true',
+				'    );',
+				'    echo "CONSTRUCTOR_ELEVATION_SUCCEEDED";',
+				'    exit(1);',
+				'} catch (\\InvalidArgumentException $e) {',
+				'    if (false === strpos($e->getMessage(), "intl") && false === strpos($e->getMessage(), "mbstring")) {',
+				'        echo "WRONG_EXCEPTION: " . $e->getMessage();',
+				'        exit(1);',
+				'    }',
+				'}',
+				'',
+				'echo "PORTABILITY_SUBPROCESS_PASSED";',
+			)
+		);
+
+		$tmp_script = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'sc_subp_' . uniqid() . '.php';
+		file_put_contents( $tmp_script, "<?php\n" . $script );
+
+		$php_bin = defined( 'PHP_BINARY' ) && PHP_BINARY ? PHP_BINARY : 'php';
+		$cmd     = escapeshellarg( $php_bin ) . ' -n ' . escapeshellarg( $tmp_script ) . ' 2>&1';
+		// phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.system_calls_shell_exec
+		$output = (string) shell_exec( $cmd );
+		if ( '' === $output ) {
+			// On some Windows environments, shell_exec might return empty if cmd.exe execution policy blocks.
+			// Fall back to proc_open.
+			$descriptors = array(
+				1 => array( 'pipe', 'w' ),
+				2 => array( 'pipe', 'w' ),
+			);
+			$process     = proc_open( $cmd, $descriptors, $pipes );
+			if ( is_resource( $process ) ) {
+				$output = (string) stream_get_contents( $pipes[1] ) . (string) stream_get_contents( $pipes[2] );
+				fclose( $pipes[1] );
+				fclose( $pipes[2] );
+				proc_close( $process );
+			}
+		}
+		if ( file_exists( $tmp_script ) ) {
+			unlink( $tmp_script );
+		}
+		// phpcs:enable
+		$this->assertStringContainsString( 'PORTABILITY_SUBPROCESS_PASSED', $output, 'Subprocess output: ' . $output );
 	}
 
 	/**

@@ -65,8 +65,12 @@ class PackageManifest implements JsonSerializable {
 		$this->mode   = $mode;
 		$this->source = self::validate_and_normalize_source( $mode, $source );
 
-		$has_mbstring = null !== $has_mbstring ? (bool) $has_mbstring : function_exists( 'mb_convert_case' );
-		$has_intl     = null !== $has_intl ? (bool) $has_intl : ( function_exists( 'normalizer_is_normalized' ) && defined( 'Normalizer::FORM_C' ) );
+		$runtime_intl     = function_exists( 'normalizer_is_normalized' ) && defined( 'Normalizer::FORM_C' );
+		$runtime_mbstring = function_exists( 'mb_convert_case' ) && defined( 'MB_CASE_FOLD' ) && function_exists( 'mb_check_encoding' );
+
+		// Capability overrides can only disable/simulate missing support (false), never force/elevate support (true).
+		$has_intl     = $runtime_intl && ( null === $has_intl || false !== $has_intl );
+		$has_mbstring = $runtime_mbstring && ( null === $has_mbstring || false !== $has_mbstring );
 
 		// Validate and normalize entries.
 		$normalized_entries = array();
@@ -84,11 +88,7 @@ class PackageManifest implements JsonSerializable {
 			$is_ascii = ( 0 === preg_match( '/[^\x20-\x7E]/', $path ) );
 
 			if ( $has_mbstring ) {
-				if ( defined( 'MB_CASE_FOLD' ) ) {
-					$lower_path = mb_convert_case( $path, MB_CASE_FOLD, 'UTF-8' );
-				} else {
-					$lower_path = mb_strtolower( $path, 'UTF-8' );
-				}
+				$lower_path = mb_convert_case( $path, MB_CASE_FOLD, 'UTF-8' );
 			} elseif ( ! $is_ascii ) {
 				throw new InvalidArgumentException( 'Non-ASCII paths require the PHP mbstring extension for Unicode case-folding safety.' );
 			} else {

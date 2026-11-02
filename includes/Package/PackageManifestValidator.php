@@ -103,8 +103,12 @@ class PackageManifestValidator {
 			);
 		}
 
-		$has_intl     = null !== $has_intl ? (bool) $has_intl : ( function_exists( 'normalizer_is_normalized' ) && defined( 'Normalizer::FORM_C' ) );
-		$has_mbstring = null !== $has_mbstring ? (bool) $has_mbstring : function_exists( 'mb_check_encoding' );
+		$runtime_intl     = function_exists( 'normalizer_is_normalized' ) && defined( 'Normalizer::FORM_C' );
+		$runtime_mbstring = function_exists( 'mb_convert_case' ) && defined( 'MB_CASE_FOLD' ) && function_exists( 'mb_check_encoding' );
+
+		// Capability overrides can only disable/simulate missing support (false), never force/elevate support (true).
+		$has_intl     = $runtime_intl && ( null === $has_intl || false !== $has_intl );
+		$has_mbstring = $runtime_mbstring && ( null === $has_mbstring || false !== $has_mbstring );
 
 		$is_ascii = ( 0 === preg_match( '/[^\x20-\x7E]/', $path ) );
 
