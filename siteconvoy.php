@@ -42,6 +42,10 @@ require_once SITECONVOY_PATH . 'includes/Contracts/MigrationPlan.php';
 require_once SITECONVOY_PATH . 'includes/Discovery/SourceDiscoveryService.php';
 require_once SITECONVOY_PATH . 'includes/Preflight/PreflightService.php';
 require_once SITECONVOY_PATH . 'includes/Planning/MigrationScopePlanner.php';
+require_once SITECONVOY_PATH . 'includes/Package/PackageManifestValidator.php';
+require_once SITECONVOY_PATH . 'includes/Package/PackageManifest.php';
+require_once SITECONVOY_PATH . 'includes/Package/PackageVerificationResult.php';
+require_once SITECONVOY_PATH . 'includes/Package/PackageStreamVerifier.php';
 
 /**
  * Inert plugin initialization hook.
