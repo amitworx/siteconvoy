@@ -609,9 +609,15 @@ class PackageManifestUnitTest extends TestCase {
 	 * Test UTF-8 and cross-platform Unicode filename validation and casefold collision rejection.
 	 */
 	public function test_utf8_and_unicode_filename_validation() {
-		// 1. Valid UTF-8 filenames with international characters are accepted.
-		$res_valid_unicode = PackageManifestValidator::validate_path( 'uploads/2026/01/ünicode-ö.jpg' );
-		$this->assertTrue( $res_valid_unicode['valid'], 'Valid UTF-8 path should be accepted.' );
+		// 1. Valid UTF-8 filenames with international characters are accepted (when extensions present).
+		if ( function_exists( 'normalizer_is_normalized' ) && defined( 'Normalizer::FORM_C' ) ) {
+			$res_valid_unicode = PackageManifestValidator::validate_path( 'uploads/2026/01/ünicode-ö.jpg' );
+			$this->assertTrue( $res_valid_unicode['valid'], 'Valid UTF-8 path should be accepted when intl is loaded.' );
+		} else {
+			// Without intl, validate with intl=true capability mock to verify validation passes.
+			$res_valid_unicode = PackageManifestValidator::validate_path( 'uploads/2026/01/ünicode-ö.jpg', true, true );
+			$this->assertTrue( $res_valid_unicode['valid'], 'Valid UTF-8 path should be accepted when intl is mocked present.' );
+		}
 
 		// 2. Malformed / invalid UTF-8 byte sequences are rejected.
 		$invalid_utf8     = "uploads/bad-\xC3\x28-sequence.jpg";
@@ -624,12 +630,22 @@ class PackageManifestUnitTest extends TestCase {
 		$res_decomposed  = PackageManifestValidator::validate_path( $decomposed_path );
 		$this->assertFalse( $res_decomposed['valid'], 'Decomposed Unicode combining mark sequences must be rejected.' );
 
-		// Composed form (U+00E9) is accepted.
+		// Composed form (U+00E9) is accepted when intl is loaded.
 		$composed_path = "uploads/caf\xC3\xA9.png";
-		$res_composed  = PackageManifestValidator::validate_path( $composed_path );
-		$this->assertTrue( $res_composed['valid'], 'Precomposed Unicode characters must be accepted.' );
+		if ( function_exists( 'normalizer_is_normalized' ) && defined( 'Normalizer::FORM_C' ) ) {
+			$res_composed = PackageManifestValidator::validate_path( $composed_path );
+			$this->assertTrue( $res_composed['valid'], 'Precomposed Unicode characters must be accepted.' );
+		} else {
+			$res_composed = PackageManifestValidator::validate_path( $composed_path, true, true );
+			$this->assertTrue( $res_composed['valid'], 'Precomposed Unicode characters must be accepted when intl is mocked present.' );
+		}
 
-		// 4. Unicode case-fold collision rejection in PackageManifest.
+		// 4. Unicode case-fold collision rejection in PackageManifest (requires intl for non-ASCII path validation).
+		if ( ! function_exists( 'normalizer_is_normalized' ) || ! defined( 'Normalizer::FORM_C' ) ) {
+			// Skip live manifest constructor on hosts lacking intl since non-ASCII paths fail closed.
+			return;
+		}
+
 		$source                    = array(
 			'is_multisite' => false,
 			'site_id'      => 1,
@@ -651,6 +667,108 @@ class PackageManifestUnitTest extends TestCase {
 		$this->expectException( \InvalidArgumentException::class );
 		$this->expectExceptionMessage( 'Case-collision duplicate entry path detected.' );
 		new PackageManifest( MigrationMode::STANDALONE_TO_SUBSITE, $source, $unicode_collision_entries );
+	}
+
+	/**
+	 * Test German eszett (ß) vs "SS" full case-folding collision rejection.
+	 */
+	public function test_unicode_full_case_fold_collision() {
+		if ( ! function_exists( 'normalizer_is_normalized' ) || ! defined( 'Normalizer::FORM_C' ) ) {
+			$this->markTestSkipped( 'PHP intl extension is not loaded in this environment (required for non-ASCII path validation).' );
+		}
+		$source         = array(
+			'is_multisite' => false,
+			'site_id'      => 1,
+			'network_id'   => null,
+			'base_prefix'  => 'wp_',
+		);
+		$eszett_entries = array(
+			array(
+				'path'   => 'uploads/straße.png',
+				'size'   => 5,
+				'sha256' => hash( 'sha256', 'first' ),
+			),
+			array(
+				'path'   => 'uploads/STRASSE.PNG',
+				'size'   => 5,
+				'sha256' => hash( 'sha256', 'second' ),
+			),
+		);
+		$this->expectException( \InvalidArgumentException::class );
+		$this->expectExceptionMessage( 'Case-collision duplicate entry path detected.' );
+		new PackageManifest( MigrationMode::STANDALONE_TO_SUBSITE, $source, $eszett_entries );
+	}
+
+	/**
+	 * Test decomposed Hangul Jamo canonical rejection when intl is present.
+	 */
+	public function test_decomposed_hangul_jamo_rejection() {
+		if ( ! function_exists( 'normalizer_is_normalized' ) || ! defined( 'Normalizer::FORM_C' ) ) {
+			$this->markTestSkipped( 'PHP intl extension is not loaded in this environment.' );
+		}
+		// Decomposed Hangul syllable "가" (e1 84 80 e1 85 a1) vs precomposed (ea b0 80).
+		$decomposed_hangul = "uploads/\xE1\x84\x80\xE1\x85\xA1.png";
+		$res_decomposed    = PackageManifestValidator::validate_path( $decomposed_hangul );
+		$this->assertFalse( $res_decomposed['valid'], 'Decomposed Hangul Jamo must be rejected under intl NFC validation.' );
+
+		$composed_hangul = "uploads/\xEA\xB0\x80.png";
+		$res_composed    = PackageManifestValidator::validate_path( $composed_hangul );
+		$this->assertTrue( $res_composed['valid'], 'Precomposed Hangul must be accepted under intl NFC validation.' );
+	}
+
+	/**
+	 * Test Unicode capability mocking: non-ASCII paths fail closed if intl or mbstring are absent, while ASCII paths succeed.
+	 */
+	public function test_extension_independent_unicode_safety_capability_policy() {
+		// Verify helper capability check.
+		// ASCII paths must always be valid regardless of extension capabilities.
+		$ascii_path = 'uploads/2026/01/photo.jpg';
+		$res_ascii  = PackageManifestValidator::validate_path( $ascii_path, false, false );
+		$this->assertTrue( $res_ascii['valid'], 'ASCII paths must be valid even when intl and mbstring are absent.' );
+
+		// Non-ASCII path with missing intl fails closed.
+		$non_ascii_path = 'uploads/café.png';
+		$res_no_intl    = PackageManifestValidator::validate_path( $non_ascii_path, false, true );
+		$this->assertFalse( $res_no_intl['valid'], 'Non-ASCII paths must fail closed when intl is absent.' );
+		$this->assertStringContainsString( 'intl', $res_no_intl['error'] );
+
+		// Non-ASCII path with missing mbstring fails closed.
+		$res_no_mb = PackageManifestValidator::validate_path( $non_ascii_path, true, false );
+		$this->assertFalse( $res_no_mb['valid'], 'Non-ASCII paths must fail closed when mbstring is absent.' );
+		$this->assertStringContainsString( 'mbstring', $res_no_mb['error'] );
+
+		// PackageManifest case folding when mbstring is absent: non-ASCII paths fail closed.
+		$source        = array(
+			'is_multisite' => false,
+			'site_id'      => 1,
+			'network_id'   => null,
+			'base_prefix'  => 'wp_',
+		);
+		$ascii_entries = array(
+			array(
+				'path'   => 'uploads/photo.jpg',
+				'size'   => 5,
+				'sha256' => hash( 'sha256', 'a' ),
+			),
+		);
+		// ASCII path succeeds with mbstring disabled.
+		$manifest_ascii = new PackageManifest( MigrationMode::STANDALONE_TO_SUBSITE, $source, $ascii_entries, false, true );
+		$this->assertSame( 1, count( $manifest_ascii->get_entries() ) );
+
+		// Non-ASCII path in PackageManifest fails closed when mbstring is disabled.
+		$unicode_entries = array(
+			array(
+				'path'   => 'uploads/Ü.png',
+				'size'   => 5,
+				'sha256' => hash( 'sha256', 'u' ),
+			),
+		);
+		try {
+			new PackageManifest( MigrationMode::STANDALONE_TO_SUBSITE, $source, $unicode_entries, false, true );
+			$this->fail( 'Expected InvalidArgumentException for non-ASCII path in PackageManifest when mbstring is disabled.' );
+		} catch ( \InvalidArgumentException $e ) {
+			$this->assertStringContainsString( 'mbstring', $e->getMessage() );
+		}
 	}
 
 	/**

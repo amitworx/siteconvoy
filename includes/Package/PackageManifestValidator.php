@@ -82,10 +82,12 @@ class PackageManifestValidator {
 	/**
 	 * Validate a single relative entry path.
 	 *
-	 * @param string $path Archive relative path.
+	 * @param string    $path        Archive relative path.
+	 * @param bool|null $has_intl    Optional capability flag for intl extension (defaults to runtime check).
+	 * @param bool|null $has_mbstring Optional capability flag for mbstring extension (defaults to runtime check).
 	 * @return array{valid: bool, error: string} Validation result.
 	 */
-	public static function validate_path( $path ) {
+	public static function validate_path( $path, $has_intl = null, $has_mbstring = null ) {
 		if ( ! is_string( $path ) || '' === $path ) {
 			return array(
 				'valid' => false,
@@ -93,8 +95,37 @@ class PackageManifestValidator {
 			);
 		}
 
+		// Reject null bytes and ASCII control characters.
+		if ( preg_match( '/[\x00-\x1F\x7F]/', $path ) ) {
+			return array(
+				'valid' => false,
+				'error' => 'Path contains Control or null character.',
+			);
+		}
+
+		$has_intl     = null !== $has_intl ? (bool) $has_intl : ( function_exists( 'normalizer_is_normalized' ) && defined( 'Normalizer::FORM_C' ) );
+		$has_mbstring = null !== $has_mbstring ? (bool) $has_mbstring : function_exists( 'mb_check_encoding' );
+
+		$is_ascii = ( 0 === preg_match( '/[^\x20-\x7E]/', $path ) );
+
+		// Fail closed for non-ASCII paths if required Unicode extensions are missing.
+		if ( ! $is_ascii ) {
+			if ( ! $has_intl ) {
+				return array(
+					'valid' => false,
+					'error' => 'Non-ASCII paths require the PHP intl extension for Unicode canonical normalization.',
+				);
+			}
+			if ( ! $has_mbstring ) {
+				return array(
+					'valid' => false,
+					'error' => 'Non-ASCII paths require the PHP mbstring extension for Unicode case-folding safety.',
+				);
+			}
+		}
+
 		// Enforce valid UTF-8 encoding.
-		if ( function_exists( 'mb_check_encoding' ) ) {
+		if ( $has_mbstring ) {
 			if ( ! mb_check_encoding( $path, 'UTF-8' ) ) {
 				return array(
 					'valid' => false,
@@ -109,9 +140,7 @@ class PackageManifestValidator {
 		}
 
 		// Enforce Unicode canonical composition (NFC) and reject decomposed combining marks (NFD).
-		// In pure PHP without intl, decomposed sequences contain Unicode combining mark category \p{M}.
-		// If intl is present, normalizer_is_normalized() confirms NFC form.
-		if ( function_exists( 'normalizer_is_normalized' ) && defined( 'Normalizer::FORM_C' ) ) {
+		if ( $has_intl && function_exists( 'normalizer_is_normalized' ) && defined( 'Normalizer::FORM_C' ) ) {
 			if ( ! normalizer_is_normalized( $path, \Normalizer::FORM_C ) ) {
 				return array(
 					'valid' => false,
@@ -123,14 +152,6 @@ class PackageManifestValidator {
 			return array(
 				'valid' => false,
 				'error' => 'Path must not contain decomposed Unicode combining marks.',
-			);
-		}
-
-		// Reject null bytes and ASCII control characters.
-		if ( preg_match( '/[\x00-\x1F\x7F]/', $path ) ) {
-			return array(
-				'valid' => false,
-				'error' => 'Path contains Control or null character.',
 			);
 		}
 
@@ -264,9 +285,11 @@ class PackageManifestValidator {
 	 * Validate entry record fields.
 	 *
 	 * @param array<string, mixed> $entry Manifest entry array.
+	 * @param bool|null            $has_intl Optional capability flag for intl extension.
+	 * @param bool|null            $has_mbstring Optional capability flag for mbstring extension.
 	 * @return array{valid: bool, error: string} Validation result.
 	 */
-	public static function validate_entry( array $entry ) {
+	public static function validate_entry( array $entry, $has_intl = null, $has_mbstring = null ) {
 		// Reject unknown extraneous keys.
 		$allowed_keys = array( 'path', 'size', 'sha256', 'type' );
 		foreach ( array_keys( $entry ) as $key ) {
@@ -285,7 +308,7 @@ class PackageManifestValidator {
 			);
 		}
 
-		$path_res = self::validate_path( $entry['path'] );
+		$path_res = self::validate_path( $entry['path'], $has_intl, $has_mbstring );
 		if ( ! $path_res['valid'] ) {
 			return $path_res;
 		}

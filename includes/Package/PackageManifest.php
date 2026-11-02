@@ -49,13 +49,15 @@ class PackageManifest implements JsonSerializable {
 	/**
 	 * Constructor.
 	 *
-	 * @param string                           $mode    Migration mode.
-	 * @param array<string, mixed>             $source  Source metadata.
-	 * @param array<int, array<string, mixed>> $entries List of package entries.
+	 * @param string                           $mode         Migration mode.
+	 * @param array<string, mixed>             $source       Source metadata.
+	 * @param array<int, array<string, mixed>> $entries      List of package entries.
+	 * @param bool|null                        $has_mbstring Optional capability flag for mbstring (defaults to runtime check).
+	 * @param bool|null                        $has_intl     Optional capability flag for intl (defaults to runtime check).
 	 *
 	 * @throws InvalidArgumentException When arguments are invalid.
 	 */
-	public function __construct( $mode, array $source, array $entries ) {
+	public function __construct( $mode, array $source, array $entries, $has_mbstring = null, $has_intl = null ) {
 		if ( ! MigrationMode::is_valid( $mode ) ) {
 			throw new InvalidArgumentException( 'Invalid migration mode specified.' );
 		}
@@ -63,21 +65,32 @@ class PackageManifest implements JsonSerializable {
 		$this->mode   = $mode;
 		$this->source = self::validate_and_normalize_source( $mode, $source );
 
+		$has_mbstring = null !== $has_mbstring ? (bool) $has_mbstring : function_exists( 'mb_convert_case' );
+		$has_intl     = null !== $has_intl ? (bool) $has_intl : ( function_exists( 'normalizer_is_normalized' ) && defined( 'Normalizer::FORM_C' ) );
+
 		// Validate and normalize entries.
 		$normalized_entries = array();
 		$seen_paths         = array();
 		$seen_lower_paths   = array();
 
 		foreach ( $entries as $entry ) {
-			$validation = PackageManifestValidator::validate_entry( $entry );
+			$validation = PackageManifestValidator::validate_entry( $entry, $has_intl, $has_mbstring );
 			if ( ! $validation['valid'] ) {
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped
 				throw new InvalidArgumentException( sprintf( 'Invalid manifest entry: %s', $validation['error'] ) );
 			}
 
-			$path = $entry['path'];
-			if ( function_exists( 'mb_strtolower' ) ) {
-				$lower_path = mb_strtolower( $path, 'UTF-8' );
+			$path     = $entry['path'];
+			$is_ascii = ( 0 === preg_match( '/[^\x20-\x7E]/', $path ) );
+
+			if ( $has_mbstring ) {
+				if ( defined( 'MB_CASE_FOLD' ) ) {
+					$lower_path = mb_convert_case( $path, MB_CASE_FOLD, 'UTF-8' );
+				} else {
+					$lower_path = mb_strtolower( $path, 'UTF-8' );
+				}
+			} elseif ( ! $is_ascii ) {
+				throw new InvalidArgumentException( 'Non-ASCII paths require the PHP mbstring extension for Unicode case-folding safety.' );
 			} else {
 				$lower_path = strtolower( $path );
 			}
