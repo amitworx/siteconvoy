@@ -155,6 +155,11 @@ class MigrationScopePlanner {
 					$missing_table_names[] = $tbl['table_name'];
 				}
 			}
+			foreach ( $tables['global'] as $tbl ) {
+				if ( 'missing' === $tbl['status'] ) {
+					$missing_table_names[] = $tbl['table_name'];
+				}
+			}
 			foreach ( $tables['ms_global'] as $tbl ) {
 				if ( 'missing' === $tbl['status'] ) {
 					$missing_table_names[] = $tbl['table_name'];
@@ -409,16 +414,63 @@ class MigrationScopePlanner {
 		}
 
 		// Surface physically existing deprecated/legacy core_old tables (e.g. sitecategories, categories) in unresolved as needs_review.
+		$seen_old_tables = array();
 		if ( isset( $inventory['tables']['core_old'] ) && is_array( $inventory['tables']['core_old'] ) ) {
 			foreach ( $inventory['tables']['core_old'] as $logical => $meta ) {
-				if ( ! empty( $meta['exists'] ) ) {
-					$classified['unresolved'][] = array(
+				$table_name = isset( $meta['table'] ) ? $meta['table'] : '';
+				if ( ! empty( $meta['exists'] ) && '' !== $table_name && ! isset( $seen_old_tables[ $table_name ] ) ) {
+					$seen_old_tables[ $table_name ] = true;
+
+					$entry = array(
 						'logical_name' => $logical,
-						'table_name'   => isset( $meta['table'] ) ? $meta['table'] : '',
+						'table_name'   => $table_name,
 						'scope'        => 'core_old',
 						'status'       => 'needs_review',
 						'reason'       => 'Deprecated or legacy WordPress core table detected physically in database; requires operator review for legacy data retention.',
 					);
+
+					if ( null !== $source_site_id ) {
+						$entry['site_id'] = (int) $source_site_id;
+					} elseif ( MigrationMode::FULL_NETWORK_TO_NEW_ENV === $mode && 'sitecategories' !== $logical ) {
+						$entry['site_id'] = 1;
+					}
+
+					$classified['unresolved'][] = $entry;
+				}
+			}
+		}
+
+		// In full-network mode, also inspect and surface physically existing old tables on all other network subsites.
+		if ( MigrationMode::FULL_NETWORK_TO_NEW_ENV === $mode ) {
+			$network_sites = isset( $inventory['network_sites']['sites'] ) && is_array( $inventory['network_sites']['sites'] )
+				? $inventory['network_sites']['sites']
+				: array();
+
+			foreach ( $network_sites as $net_site ) {
+				$site_id = isset( $net_site['blog_id'] ) ? (int) $net_site['blog_id'] : 0;
+				if ( $site_id <= 0 ) {
+					continue;
+				}
+
+				$subsite_old = $wpdb->tables( 'old', true, $site_id );
+				foreach ( $subsite_old as $logical => $table_name ) {
+					// sitecategories is network-global on multisite; skip subsite duplication.
+					if ( 'sitecategories' === $logical ) {
+						continue;
+					}
+
+					if ( isset( $physical_lookup[ $table_name ] ) && ! isset( $seen_old_tables[ $table_name ] ) ) {
+						$seen_old_tables[ $table_name ] = true;
+
+						$classified['unresolved'][] = array(
+							'logical_name' => $logical,
+							'table_name'   => $table_name,
+							'scope'        => 'core_old',
+							'status'       => 'needs_review',
+							'site_id'      => $site_id,
+							'reason'       => sprintf( 'Deprecated or legacy WordPress core table %s detected physically for network site ID %d; requires operator review for legacy data retention.', $table_name, $site_id ),
+						);
+					}
 				}
 			}
 		}

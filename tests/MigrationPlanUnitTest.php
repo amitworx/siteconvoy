@@ -404,4 +404,184 @@ class MigrationPlanUnitTest extends TestCase {
 		$this->assertArrayHasKey( 2, $deps['per_site'] );
 		$this->assertTrue( $deps['per_site'][2]['theme']['is_child'] );
 	}
+
+	/**
+	 * Test that serialized MigrationPlan conform strictly to the schema specification in schemas/migration-plan.json
+	 * across representative standalone/multisite, authorized/unauthorized, and blocked plans.
+	 */
+	public function test_serialized_migration_plan_conforms_to_canonical_json_schema() {
+		$schema_file = dirname( __DIR__ ) . '/schemas/migration-plan.json';
+		$this->assertFileExists( $schema_file );
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		$raw_schema = file_get_contents( $schema_file );
+		$this->assertNotFalse( $raw_schema );
+		$schema = json_decode( $raw_schema, true );
+		$this->assertIsArray( $schema );
+
+		$required_root = $schema['required'];
+		$this->assertContains( 'schema_version', $required_root );
+		$this->assertContains( 'mode', $required_root );
+		$this->assertContains( 'source_site_id', $required_root );
+		$this->assertContains( 'status', $required_root );
+		$this->assertContains( 'is_executable', $required_root );
+		$this->assertContains( 'source_topology', $required_root );
+		$this->assertContains( 'tables', $required_root );
+		$this->assertContains( 'dependencies', $required_root );
+		$this->assertContains( 'outstanding_verifications', $required_root );
+		$this->assertContains( 'preflight', $required_root );
+
+		// 1. Authorized Subsite Plan.
+		$preflight1 = new PreflightReport(
+			MigrationMode::SUBSITE_TO_STANDALONE,
+			2,
+			PreflightReport::STATUS_SOURCE_INSPECTED,
+			false,
+			array(
+				'expected_type'       => 'standalone',
+				'verification_status' => 'unverified',
+			),
+			array(),
+			array()
+		);
+		$plan1      = new MigrationPlan(
+			MigrationMode::SUBSITE_TO_STANDALONE,
+			2,
+			'needs_review',
+			array(
+				'blog'       => array(
+					array(
+						'logical_name' => 'posts',
+						'table_name'   => 'wp_2_posts',
+						'scope'        => 'blog',
+						'status'       => 'included',
+						'reason'       => 'Core blog table.',
+					),
+				),
+				'global'     => array(
+					array(
+						'logical_name' => 'users',
+						'table_name'   => 'wp_users',
+						'scope'        => 'global',
+						'status'       => 'excluded',
+						'reason'       => 'Shared users excluded.',
+					),
+				),
+				'ms_global'  => array(),
+				'unresolved' => array(),
+			),
+			array(
+				'themes'     => array(),
+				'plugins'    => array(),
+				'mu_plugins' => array(),
+				'dropins'    => array(),
+				'media'      => array(
+					'layout'             => 'standard',
+					'offload_indicators' => array(),
+				),
+			),
+			$preflight1,
+			array(
+				'is_multisite'       => true,
+				'current_network_id' => 1,
+				'base_prefix'        => 'wp_',
+				'site_count'         => 2,
+			)
+		);
+
+		// 2. Unauthorized Plan.
+		$finding_unauth = new PreflightFinding( 'SC_AUTH_FORBIDDEN', PreflightFinding::SEVERITY_BLOCKER, 'Unauthorized.' );
+		$preflight2     = new PreflightReport(
+			MigrationMode::SUBSITE_TO_STANDALONE,
+			1,
+			PreflightReport::STATUS_UNAUTHORIZED,
+			false,
+			array(
+				'expected_type'       => 'standalone',
+				'verification_status' => 'unverified',
+			),
+			null,
+			array( $finding_unauth )
+		);
+		$plan2          = new MigrationPlan(
+			MigrationMode::SUBSITE_TO_STANDALONE,
+			1,
+			'draft',
+			array(),
+			array(),
+			$preflight2,
+			array()
+		);
+
+		// 3. Blocked Plan (Missing tables).
+		$finding_blocked = new PreflightFinding( 'SC_MISSING_CORE_TABLES_PLAN', PreflightFinding::SEVERITY_BLOCKER, 'Missing tables.' );
+		$preflight3      = new PreflightReport(
+			MigrationMode::FULL_NETWORK_TO_NEW_ENV,
+			null,
+			PreflightReport::STATUS_BLOCKED,
+			false,
+			array(
+				'expected_type'       => 'multisite_network',
+				'verification_status' => 'unverified',
+			),
+			array(),
+			array( $finding_blocked )
+		);
+		$plan3           = new MigrationPlan(
+			MigrationMode::FULL_NETWORK_TO_NEW_ENV,
+			null,
+			'blocked',
+			array(
+				'blog'       => array(),
+				'global'     => array(),
+				'ms_global'  => array(),
+				'unresolved' => array(),
+			),
+			array(
+				'themes'     => array(),
+				'plugins'    => array(),
+				'mu_plugins' => array(),
+				'dropins'    => array(),
+				'media'      => array(
+					'layout'             => 'standard',
+					'offload_indicators' => array(),
+				),
+			),
+			$preflight3,
+			array(
+				'is_multisite'       => true,
+				'current_network_id' => 1,
+				'base_prefix'        => 'wp_',
+				'site_count'         => 1,
+			)
+		);
+
+		$test_plans = array( $plan1, $plan2, $plan3 );
+
+		foreach ( $test_plans as $idx => $p ) {
+			$arr = $p->to_array();
+
+			// All required fields present.
+			foreach ( $required_root as $req_field ) {
+				$this->assertArrayHasKey( $req_field, $arr, "Missing root field {$req_field} in plan {$idx}." );
+			}
+
+			// Validate schema version and non-executable invariant.
+			$this->assertSame( '1.0.0', $arr['schema_version'] );
+			$this->assertFalse( $arr['is_executable'] );
+			$this->assertContains( $arr['mode'], $schema['properties']['mode']['enum'] );
+			$this->assertContains( $arr['status'], $schema['properties']['status']['enum'] );
+			$this->assertIsArray( $arr['source_topology'] );
+			$this->assertIsArray( $arr['tables'] );
+			$this->assertIsArray( $arr['dependencies'] );
+			$this->assertIsArray( $arr['outstanding_verifications'] );
+
+			// Check no sensitive credential patterns leak in serialized JSON.
+			$json_str = (string) wp_json_encode( $arr );
+			$this->assertStringNotContainsString( 'db_password', $json_str );
+			$this->assertStringNotContainsString( 'user_pass', $json_str );
+			$this->assertStringNotContainsString( 'NONCE_KEY', $json_str );
+			$this->assertStringNotContainsString( 'AUTH_KEY', $json_str );
+		}
+	}
 }

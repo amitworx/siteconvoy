@@ -542,6 +542,145 @@ class MigrationScopePlannerIntegrationTest extends WP_UnitTestCase {
 	}
 
 	/**
+	 * Test that physically existing legacy old tables on a secondary subsite are included
+	 * exactly once in unresolved review for full-network planning with site provenance,
+	 * without duplicate ms_global entries or misclassification into custom tables.
+	 */
+	public function test_full_network_plan_surfaces_subsite_core_old_tables_in_review() {
+		global $wpdb;
+
+		if ( ! is_multisite() ) {
+			$this->assertFalse( is_multisite() );
+			return;
+		}
+
+		$admin_id = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		grant_super_admin( $admin_id );
+		wp_set_current_user( $admin_id );
+
+		remove_filter( 'query', array( $this, '_create_temporary_tables' ) );
+		remove_filter( 'query', array( $this, '_drop_temporary_tables' ) );
+
+		$subsite_id        = self::factory()->blog->create();
+		$subsite_prefix    = $wpdb->get_blog_prefix( $subsite_id );
+		$subsite_old_table = $subsite_prefix . 'categories';
+
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$wpdb->query( "CREATE TABLE IF NOT EXISTS `{$subsite_old_table}` (cat_id BIGINT PRIMARY KEY, cat_name VARCHAR(55))" );
+
+		try {
+			$planner = new MigrationScopePlanner();
+			$plan    = $planner->plan( MigrationMode::FULL_NETWORK_TO_NEW_ENV );
+
+			$tables = $plan->get_tables();
+			$this->assertNotEmpty( $tables['unresolved'] );
+
+			$subsite_old_entries = array();
+			foreach ( $tables['unresolved'] as $entry ) {
+				if ( $entry['table_name'] === $subsite_old_table ) {
+					$subsite_old_entries[] = $entry;
+				}
+			}
+
+			// Must appear exactly once in unresolved tables.
+			$this->assertCount( 1, $subsite_old_entries, 'Subsite old table must appear exactly once in unresolved review manifest.' );
+
+			$entry = $subsite_old_entries[0];
+			$this->assertSame( 'needs_review', $entry['status'] );
+			$this->assertSame( 'core_old', $entry['scope'] );
+			$this->assertSame( 'categories', $entry['logical_name'] );
+			$this->assertSame( $subsite_id, $entry['site_id'] );
+			$this->assertStringContainsString( 'site ID ' . $subsite_id, $entry['reason'] );
+
+			// Must not be misclassified as custom table.
+			$custom_tables = array();
+			foreach ( $tables['unresolved'] as $entry ) {
+				if ( 'custom' === $entry['scope'] ) {
+					$custom_tables[] = $entry['table_name'];
+				}
+			}
+			$this->assertNotContains( $subsite_old_table, $custom_tables, 'Subsite old table must not be misclassified as a custom table.' );
+		} finally {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			$wpdb->query( "DROP TABLE IF EXISTS `{$subsite_old_table}`" );
+			wp_delete_site( $subsite_id );
+			$subsite_tables = $wpdb->tables( 'blog', true, $subsite_id );
+			foreach ( $subsite_tables as $st ) {
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$wpdb->query( "DROP TABLE IF EXISTS `{$st}`" );
+			}
+			add_filter( 'query', array( $this, '_create_temporary_tables' ) );
+			add_filter( 'query', array( $this, '_drop_temporary_tables' ) );
+		}
+	}
+
+	/**
+	 * Test that missing global identity tables (users, usermeta) fail closed and are reported
+	 * in SC_MISSING_CORE_TABLES_PLAN blocker finding with correct table name and count.
+	 */
+	public function test_missing_global_identity_tables_included_in_blocker_finding() {
+		global $wpdb;
+
+		$admin_id = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		if ( is_multisite() ) {
+			grant_super_admin( $admin_id );
+		}
+		wp_set_current_user( $admin_id );
+
+		// Simulate physical tables catalog missing 'wp_users' without dropping the real DB table.
+		$real_tables = $wpdb->get_col( 'SHOW TABLES' ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
+		$users_table = $wpdb->users;
+
+		// Filter out users table from physical list.
+		$mocked_physical = array_values( array_diff( $real_tables, array( $users_table ) ) );
+
+		$discovery = new SourceDiscoveryService( array( 'physical_tables' => $mocked_physical ) );
+		$preflight = new PreflightService( $discovery );
+		$planner   = new MigrationScopePlanner( $preflight, $discovery );
+
+		$mode = is_multisite() ? MigrationMode::FULL_NETWORK_TO_NEW_ENV : MigrationMode::STANDALONE_TO_SUBSITE;
+		$plan = $planner->plan( $mode );
+
+		$this->assertSame( 'blocked', $plan->get_status() );
+		$this->assertFalse( $plan->is_executable() );
+
+		// Verify that global tables has status 'missing'.
+		$tables = $plan->get_tables();
+		$this->assertNotEmpty( $tables['global'] );
+
+		$users_entry = null;
+		foreach ( $tables['global'] as $entry ) {
+			if ( $entry['table_name'] === $users_table ) {
+				$users_entry = $entry;
+				break;
+			}
+		}
+
+		$this->assertNotNull( $users_entry, 'Users table entry must exist in global tables.' );
+		$this->assertSame( 'missing', $users_entry['status'] );
+
+		// Check the preflight report blocker finding.
+		$preflight_report = $plan->get_preflight_report();
+		$this->assertNotNull( $preflight_report );
+		$findings = $preflight_report->get_findings();
+
+		$missing_finding = null;
+		foreach ( $findings as $b ) {
+			if ( 'SC_MISSING_CORE_TABLES_PLAN' === $b->get_id() ) {
+				$missing_finding = $b;
+				break;
+			}
+		}
+
+		$this->assertNotNull( $missing_finding, 'SC_MISSING_CORE_TABLES_PLAN finding must be present.' );
+		$context = $missing_finding->get_context();
+		$this->assertArrayHasKey( 'missing_tables', $context );
+		$this->assertContains( $users_table, $context['missing_tables'], 'Missing users table must be in missing_tables list.' );
+		$this->assertSame( count( $context['missing_tables'] ), $context['total_missing'] );
+		$this->assertStringContainsString( $users_table, $missing_finding->get_message() );
+	}
+
+	/**
 	 * Test that MU-plugins and per-site dependencies are discovered and included in plan.
 	 */
 	public function test_mu_plugins_and_per_site_dependencies_in_plan() {

@@ -101,27 +101,29 @@ Each table entry in the manifest receives a status:
 ## 4. Metadata-Only Dependency Extraction
 
 The `dependencies` section inspects active runtime components without serializing code or executing side effects:
-- **Active Plugins**: Extracted from `active_plugins` (or `active_sitewide_plugins` on network mode). Contains plugin file relative paths, Name, and Version (read via `get_file_data()` or `get_plugin_data()`).
-- **Active Theme**: Current stylesheet, template, theme name, version, parent theme (if child theme), and theme text domain.
-- **Drop-Ins & MU-Plugins**: Discovered via `wp_get_mu_plugins()` and standard WordPress drop-in filenames (`advanced-cache.php`, `object-cache.php`, `db.php`, `sunrise.php`). All discovered must-use plugins are captured under the `mu_plugins` dependency key.
-- **Per-Site Dependencies (Full Network)**: In `full_network_to_new_env` mode, per-site theme configurations and active plugin dependencies are safely discovered across all network sites under the `per_site` key, using clean context switching (`switch_to_blog()` wrapped in `try ... finally { restore_current_blog(); }`).
+- **Active Plugins**: Discovered shallow metadata relative paths (`slug`), network-activation flags (`sitewide`), and review state (`status: "review_required"`).
+- **Active Themes**: Current active theme slug (`stylesheet`), template slug, and parent indicator if child theme.
+- **Drop-Ins & MU-Plugins**: Discovered drop-in filenames (`advanced-cache.php`, `object-cache.php`, `db.php`, `sunrise.php`) and must-use plugin filenames from discovery inventory.
+- **Media Uploads Layout**: Filesystem directory layout flags (`legacy_blogs_dir` vs `standard`), `ms_files_rewriting`, and detected offload indicators.
+- **Per-Site Dependencies (Full Network)**: In `full_network_to_new_env` mode, per-site theme configurations (`stylesheet`, `template`, `is_child`) and active plugin relative slugs are captured across all network sites under the `per_site` key, using clean context switching (`switch_to_blog()` wrapped in `try ... finally { restore_current_blog(); }`).
 
 ---
 
-## 5. Verification Checklist
+## 5. Outstanding Verifications
 
-The plan generates an outstanding verification checklist for operators and automated preflight validators before any future migration stage can proceed:
+The plan generates an outstanding verification checklist for operators and automated preflight validators before any future migration stage can proceed in M2+:
 
-1. **User Identity Mapping**: Verification of administrator and author user accounts, email collisions, and role mappings.
-2. **Domain & Path Rewriting**: Planning search-replace for old vs new URLs, HTTP vs HTTPS, and subdirectory vs subdomain structures.
-3. **Uploads Filesystem Space**: Disk space verification for media files on destination filesystem.
-4. **Active Plugin & Theme Availability**: Ensuring required themes and plugins exist on destination environment.
-5. **Drop-in / Object Cache Evaluation**: Verifying custom cache drop-ins (`object-cache.php`) are compatible with destination infrastructure.
-6. **Destination Write Freeze / Maintenance Window**: Establishing write locks or maintenance mode during cutover.
+1. `destination_environment_connectivity_and_compatibility`: Destination environment connectivity and version compatibility.
+2. `user_identity_collision_and_role_mapping_approval`: Verification of administrator and author user accounts, email collisions, and role mappings.
+3. `unresolved_custom_and_plugin_table_disposition`: Explicit operator review and disposition policy for custom/unknown database tables.
+4. `pre_migration_backup_checkpoint_creation`: Creation and verification of restorable pre-migration backup snapshots.
+5. `operator_explicit_execution_approval`: Explicit privileged administrator approval before cutover execution.
 
 ---
 
 ## 6. MigrationPlan JSON Schema (v1.0.0)
+
+The canonical JSON Schema is located in [`schemas/migration-plan.json`](../schemas/migration-plan.json).
 
 ```json
 {
@@ -130,47 +132,88 @@ The plan generates an outstanding verification checklist for operators and autom
   "type": "object",
   "required": [
     "schema_version",
-    "created_at",
-    "operation_mode",
+    "mode",
     "source_site_id",
-    "is_executable",
     "status",
-    "preflight",
+    "is_executable",
+    "source_topology",
     "tables",
     "dependencies",
-    "verification_checklist"
+    "outstanding_verifications",
+    "preflight"
   ],
   "properties": {
-    "schema_version": { "type": "string", "const": "1.0.0" },
-    "created_at": { "type": "string", "format": "date-time" },
-    "operation_mode": { "type": "string", "enum": ["subsite_to_standalone", "subsite_to_multisite", "full_network_to_new_env", "standalone_to_subsite"] },
-    "source_site_id": { "type": ["integer", "null"] },
-    "is_executable": { "type": "boolean", "const": false },
-    "status": { "type": "string", "enum": ["ready_for_review", "blocked", "unauthorized"] },
-    "preflight": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "subsite_to_standalone",
+        "subsite_to_multisite",
+        "full_network_to_new_env",
+        "standalone_to_subsite"
+      ]
+    },
+    "source_site_id": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "needs_review",
+        "blocked",
+        "unauthorized"
+      ]
+    },
+    "is_executable": {
+      "type": "boolean",
+      "const": false
+    },
+    "source_topology": {
       "type": "object",
-      "required": ["status", "can_proceed_to_next_stage", "findings_count", "blockers_count", "warnings_count"]
+      "required": [
+        "is_multisite",
+        "current_network_id",
+        "base_prefix",
+        "site_count"
+      ]
     },
     "tables": {
       "type": "object",
-      "required": ["blog", "global", "ms_global", "unresolved"],
-      "properties": {
-        "blog": { "type": "array" },
-        "global": { "type": "array" },
-        "ms_global": { "type": "array" },
-        "unresolved": { "type": "array" }
-      }
+      "required": [
+        "blog",
+        "global",
+        "ms_global",
+        "unresolved"
+      ]
     },
     "dependencies": {
       "type": "object",
-      "required": ["plugins", "theme", "mu_plugins", "dropins"]
+      "required": [
+        "themes",
+        "plugins",
+        "mu_plugins",
+        "dropins",
+        "media"
+      ]
     },
-    "verification_checklist": {
+    "outstanding_verifications": {
       "type": "array",
       "items": {
-        "type": "object",
-        "required": ["id", "title", "description", "status"]
+        "type": "string"
       }
+    },
+    "preflight": {
+      "type": [
+        "object",
+        "null"
+      ]
     }
   }
 }

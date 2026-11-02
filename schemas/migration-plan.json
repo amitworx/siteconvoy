@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SiteConvoyMigrationPlan",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "mode",
+    "source_site_id",
+    "status",
+    "is_executable",
+    "source_topology",
+    "tables",
+    "dependencies",
+    "outstanding_verifications",
+    "preflight"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "subsite_to_standalone",
+        "subsite_to_multisite",
+        "full_network_to_new_env",
+        "standalone_to_subsite"
+      ]
+    },
+    "source_site_id": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "needs_review",
+        "blocked",
+        "unauthorized"
+      ]
+    },
+    "is_executable": {
+      "type": "boolean",
+      "const": false
+    },
+    "source_topology": {
+      "type": "object",
+      "required": [
+        "is_multisite",
+        "current_network_id",
+        "base_prefix",
+        "site_count"
+      ],
+      "properties": {
+        "is_multisite": { "type": "boolean" },
+        "current_network_id": { "type": "integer" },
+        "base_prefix": { "type": "string" },
+        "site_count": { "type": "integer" },
+        "network_sites": { "type": "array" }
+      }
+    },
+    "tables": {
+      "type": "object",
+      "required": [
+        "blog",
+        "global",
+        "ms_global",
+        "unresolved"
+      ],
+      "properties": {
+        "blog": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["logical_name", "table_name", "scope", "status", "reason"]
+          }
+        },
+        "global": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["logical_name", "table_name", "scope", "status", "reason"]
+          }
+        },
+        "ms_global": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["logical_name", "table_name", "scope", "status", "reason"]
+          }
+        },
+        "unresolved": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["logical_name", "table_name", "scope", "status", "reason"]
+          }
+        }
+      }
+    },
+    "dependencies": {
+      "type": "object",
+      "required": [
+        "themes",
+        "plugins",
+        "mu_plugins",
+        "dropins",
+        "media"
+      ],
+      "properties": {
+        "themes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["slug", "status", "parent"]
+          }
+        },
+        "plugins": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["slug", "sitewide", "status"]
+          }
+        },
+        "mu_plugins": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["filename", "status"]
+          }
+        },
+        "dropins": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["filename", "status"]
+          }
+        },
+        "media": {
+          "type": "object",
+          "required": ["layout", "offload_indicators"]
+        },
+        "per_site": {
+          "type": "object"
+        }
+      }
+    },
+    "outstanding_verifications": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "preflight": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "schema_version": { "type": "string" },
+        "mode": { "type": "string" },
+        "source_site_id": { "type": ["integer", "null"] },
+        "status": { "type": "string" },
+        "can_proceed_to_next_stage": { "type": "boolean" },
+        "target_expectations": { "type": "object" },
+        "counts": { "type": "object" },
+        "findings": { "type": "array" }
+      }
+    }
+  }
+}
