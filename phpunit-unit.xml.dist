@@ -22,6 +22,7 @@
             <file>./tests/MigrationPlanUnitTest.php</file>
             <file>./tests/PackageManifestUnitTest.php</file>
             <file>./tests/PackageArchiveWriterUnitTest.php</file>
+            <file>./tests/PackageArchiveInspectorUnitTest.php</file>
         </testsuite>
     </testsuites>
 </phpunit>
