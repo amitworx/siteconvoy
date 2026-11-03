@@ -50,6 +50,8 @@ require_once SITECONVOY_PATH . 'includes/Package/PackageArchiveWriterResult.php'
 require_once SITECONVOY_PATH . 'includes/Package/PackageArchiveWriter.php';
 require_once SITECONVOY_PATH . 'includes/Package/PackageArchiveInspectionResult.php';
 require_once SITECONVOY_PATH . 'includes/Package/PackageArchiveInspector.php';
+require_once SITECONVOY_PATH . 'includes/Package/PackageArchiveStagingResult.php';
+require_once SITECONVOY_PATH . 'includes/Package/PackageArchiveStager.php';
 
 /**
  * Inert plugin initialization hook.

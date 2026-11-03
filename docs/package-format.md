@@ -189,11 +189,46 @@ Entries in `PackageManifest` are sorted canonically by `path` using standard byt
 
 ---
 
-## 7. What Is NOT Built in M2-003
+## 7. Isolated Package Archive Payload Stager (`PackageArchiveStager`)
 
-The following capabilities are explicitly outside the scope of `SITECONVOY-M2-003`:
-- **Archive Extraction & Ingestion**: No ZIP archives are uncompressed or unpacked onto the target filesystem.
-- **Migration Authorization & Trust Approval**: Inbound inspection does not authorize migration or approve cryptographic trust.
-- **Target Site Mutation**: No database tables are imported, altered, or created. No options or posts are written.
-- **REST / WP-CLI Endpoints & Background Cron**: The inspector is an internal PHP class without web-accessible endpoints or scheduled cron hooks.
-- **Deployment & Migration Cutover**: No sites are created, deleted, or activated.
+`SiteConvoy\Package\PackageArchiveStager` implements SiteConvoy's secure, isolated ZIP payload staging primitive:
+
+### Key Design & Safety Invariants
+1. **Isolated Private Staging Workspace & Ownership Checks**:
+   - Requires an explicit local archive path, an explicit caller-owned trusted private staging parent directory, and a caller-supplied 64-character lowercase hex expected archive SHA-256 digest.
+   - On POSIX, validates that the staging parent directory exists, is a genuine directory, is not symlinked (nor contains any symlinked ancestors), and has private restrictive permissions (`0700`). Permissive staging parents fail closed (`STAGING_PARENT_NOT_PRIVATE`).
+   - Validates that the staging parent does not reside within known WordPress install paths (`ABSPATH`) or public content/uploads directories (`WP_CONTENT_DIR`), failing closed with `STAGING_PARENT_IN_PUBLIC_LOCATION`.
+   - Validates effective process ownership (`posix_geteuid()`) of the staging parent directory where available; unverified ownership fails closed (`STAGING_PARENT_OWNERSHIP_UNVERIFIED`).
+   - Allocates an exclusive per-operation staging directory (`mkdir(..., 0700)`) with cryptographically secure random names (`sc_stage_<random>`).
+   - Restrictive directory permissions (`0700`) and file permissions (`0600`) are explicitly enforced and re-verified both before writing payload bytes and after writing, regardless of process umask (e.g. `0000`).
+2. **Platform Security Boundary**:
+   - Fails closed immediately on native Windows environments with `SECURE_FILESYSTEM_PERMISSIONS_UNAVAILABLE` before making any directory or file mutations, due to unverified NTFS access control lists.
+3. **Verified Input, Pre-Extraction Recheck & Streaming Extraction**:
+   - Pre-validates the archive using `PackageArchiveInspector::inspect()` before creating any workspace directories.
+   - Compares the caller's expected archive digest against the verified archive digest using constant-time `hash_equals()`.
+   - Re-verifies source archive stat attributes and SHA-256 digest immediately before opening and staging payload bytes, detecting any swap or TOCTOU alteration (`ARCHIVE_CHANGED_BEFORE_STAGING`).
+   - Never calls `ZipArchive::extractTo()` or OS shell unzip utilities.
+   - Reads each declared regular payload entry from `ZipArchive` in bounded 64 KB memory chunks, copying bytes to exclusively created destination files (`fopen(..., 'xb')`).
+   - Verifies exact copied byte counts and SHA-256 hashes against the validated manifest during streaming.
+   - Only manifest-declared regular files under `database/`, `uploads/`, or `assets/` are staged. `manifest.json` is not staged as a file.
+   - Preserves successful zero-entry staging workspaces for valid empty manifests without triggering spurious cleanup.
+4. **Filesystem Containment**:
+   - Rejects path traversal (`..`), backslashes, absolute paths, and null bytes.
+   - Ensures destination files and created subdirectories remain strictly contained inside the exclusive operation staging directory.
+5. **Archive Stability & Verified Failure Cleanup**:
+   - Verifies file identity attributes (`size`, `mtime`, `dev`, `ino`) and SHA-256 checksum of the source archive post-staging. If the source archive mutates during staging, fails closed with `ARCHIVE_CHANGED_DURING_STAGING`.
+   - On any failure or exception, cleans up only the operation-owned files, subdirectories, and staging root. Caller sentinels, parent workspaces, and unrelated directories remain untouched.
+   - Verifies that cleanup succeeded by confirming complete removal of all created files, directories, and the operation root. If automated cleanup cannot be verified, fails closed with a distinct `MANUAL_RECOVERY_REQUIRED` error and exposes the recovery locator.
+6. **Immutable Outcome Ledger**:
+   - Returns immutable `PackageArchiveStagingResult` exposing the staging root path, validated manifest, staged count, staged bytes, verified archive digest, and relative-to-staged path ledger.
+
+---
+
+## 8. What Is NOT Built in M2-004
+
+The following capabilities are explicitly outside the scope of `SITECONVOY-M2-004`:
+- **Live Site Mutation & Import Cutover**: Staged files are isolated in the private staging directory. No files are moved into live `wp-content`, uploads, themes, or plugins.
+- **Database Import & Table Execution**: No SQL statements or tables are executed or imported into WordPress.
+- **Migration Authorization & Trust Policy**: Expected digest verification checks checksum integrity, not publisher identity or cryptographic authorization.
+- **REST / WP-CLI Endpoints & Background Cron**: The stager is an internal PHP class without web-accessible endpoints or background cron jobs.
+- **Deployment & Site Creation**: No WordPress sites, subsites, or options are modified or created.

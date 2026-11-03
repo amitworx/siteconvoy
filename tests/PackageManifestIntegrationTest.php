@@ -20,6 +20,8 @@ use SiteConvoy\Package\PackageArchiveWriter;
 use SiteConvoy\Package\PackageArchiveWriterResult;
 use SiteConvoy\Package\PackageArchiveInspector;
 use SiteConvoy\Package\PackageArchiveInspectionResult;
+use SiteConvoy\Package\PackageArchiveStager;
+use SiteConvoy\Package\PackageArchiveStagingResult;
 
 /**
  * Class PackageManifestIntegrationTest
@@ -38,6 +40,8 @@ class PackageManifestIntegrationTest extends WP_UnitTestCase {
 		$this->assertTrue( class_exists( PackageArchiveWriterResult::class ), 'PackageArchiveWriterResult must be autoloaded.' );
 		$this->assertTrue( class_exists( PackageArchiveInspector::class ), 'PackageArchiveInspector must be autoloaded.' );
 		$this->assertTrue( class_exists( PackageArchiveInspectionResult::class ), 'PackageArchiveInspectionResult must be autoloaded.' );
+		$this->assertTrue( class_exists( PackageArchiveStager::class ), 'PackageArchiveStager must be autoloaded.' );
+		$this->assertTrue( class_exists( PackageArchiveStagingResult::class ), 'PackageArchiveStagingResult must be autoloaded.' );
 	}
 
 	/**
@@ -350,6 +354,120 @@ class PackageManifestIntegrationTest extends WP_UnitTestCase {
 		if ( is_dir( $staging_dir ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
 			rmdir( $staging_dir );
+		}
+		if ( is_dir( $temp_dir ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
+			rmdir( $temp_dir );
+		}
+
+		// Assert zero database modifications.
+		$final_options_count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->options}" );
+		$final_posts_count   = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->posts}" );
+
+		$this->assertSame( $initial_options_count, $final_options_count, 'No options may be written.' );
+		$this->assertSame( $initial_posts_count, $final_posts_count, 'No posts may be created.' );
+	}
+
+	/**
+	 * Test that staging an archive in WordPress runtime stages files to private staging directory
+	 * and causes zero database mutations or options writes.
+	 */
+	public function test_package_stager_in_wordpress_has_zero_persistence() {
+		global $wpdb;
+
+		$initial_options_count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->options}" );
+		$initial_posts_count   = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->posts}" );
+
+		$temp_dir = sys_get_temp_dir() . '/sc_wp_stager_integration_' . uniqid();
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
+		mkdir( $temp_dir, 0700, true );
+
+		$destination_zip = $temp_dir . '/test.zip';
+		$writer_staging  = $temp_dir . '/writer_staging';
+		$stager_staging  = $temp_dir . '/stager_staging';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
+		mkdir( $writer_staging, 0700, true );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
+		mkdir( $stager_staging, 0700, true );
+
+		$content  = 'Synthetic SQL database dump for writer-to-stager integration.';
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'network_id'   => null,
+				'base_prefix'  => $wpdb->base_prefix,
+			),
+			array(
+				array(
+					'path'   => 'database/posts.sql',
+					'size'   => strlen( $content ),
+					'sha256' => hash( 'sha256', $content ),
+					'type'   => 'regular',
+				),
+			)
+		);
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$stream = fopen( 'php://temp', 'r+' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+		fwrite( $stream, $content );
+		rewind( $stream );
+
+		$writer       = new PackageArchiveWriter();
+		$write_result = $writer->write(
+			$manifest,
+			array( 'database/posts.sql' => $stream ),
+			$destination_zip,
+			$writer_staging
+		);
+
+		$this->assertTrue( $write_result->is_success(), 'Writer must succeed on Linux CI.' );
+
+		$inspector      = new PackageArchiveInspector();
+		$inspect_result = $inspector->inspect( $destination_zip );
+		$this->assertTrue( $inspect_result->is_success(), 'Inspector must succeed.' );
+
+		$stager       = new PackageArchiveStager();
+		$stage_result = $stager->stage( $destination_zip, $stager_staging, $inspect_result->get_archive_sha256() );
+
+		$this->assertTrue( $stage_result->is_success(), 'Stager must succeed on Linux CI.' );
+		$this->assertSame( 1, $stage_result->get_staged_count() );
+		$this->assertSame( strlen( $content ), $stage_result->get_staged_bytes() );
+
+		$ledger = $stage_result->get_staged_ledger();
+		$this->assertArrayHasKey( 'database/posts.sql', $ledger );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		$this->assertSame( $content, file_get_contents( $ledger['database/posts.sql'] ) );
+
+		// Clean up staging root.
+		$staged_root = $stage_result->get_staging_root();
+		if ( is_dir( $staged_root ) ) {
+			if ( file_exists( $ledger['database/posts.sql'] ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_unlink, WordPress.WP.AlternativeFunctions.unlink_unlink
+				unlink( $ledger['database/posts.sql'] );
+			}
+			$db_dir = dirname( $ledger['database/posts.sql'] );
+			if ( is_dir( $db_dir ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
+				rmdir( $db_dir );
+			}
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
+			rmdir( $staged_root );
+		}
+
+		if ( file_exists( $destination_zip ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_unlink, WordPress.WP.AlternativeFunctions.unlink_unlink
+			unlink( $destination_zip );
+		}
+		if ( is_dir( $writer_staging ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
+			rmdir( $writer_staging );
+		}
+		if ( is_dir( $stager_staging ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
+			rmdir( $stager_staging );
 		}
 		if ( is_dir( $temp_dir ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
