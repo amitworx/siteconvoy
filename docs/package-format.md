@@ -1,9 +1,10 @@
 # SiteConvoy Migration Package Format Specification
 
 > [!NOTE]
-> **Task Reference:** `SITECONVOY-M2-001`  
-> **Status:** SPECIFICATION & READ-ONLY INTEGRITY VERIFIER (`format_version: "1.0"`)  
-> This document specifies SiteConvoy's migration package structure, canonical `manifest.json` contract, safe entry path validation rules, and streaming SHA-256 integrity verification.
+> **Task Reference:** `SITECONVOY-M2-001` / `SITECONVOY-M2-002`
+>
+> **Status:** SPECIFICATION, STREAM INTEGRITY VERIFIER & SAFE DETERMINISTIC ZIP WRITER (`format_version: "1.0"`)
+> This document specifies SiteConvoy's migration package structure, canonical `manifest.json` contract, safe entry path validation rules, streaming SHA-256 integrity verification, and safe deterministic ZIP archive generation (`PackageArchiveWriter`).
 
 ---
 
@@ -13,7 +14,7 @@
 > **INTEGRITY IS NOT AUTHENTICITY**  
 > A valid SHA-256 checksum proves only that a byte stream has not been corrupted, truncated, or modified relative to the manifest that declared it. **It does not prove that the package or manifest originated from an authorized source.** An attacker who intercepts or replaces an entire archive package can trivially generate an updated `manifest.json` containing valid SHA-256 hashes for malicious payloads.
 > 
-> Checksum verification inside `PackageStreamVerifier` is an **internal integrity guard** preventing partial writes, storage corruption, and truncation. **Out-of-band trust**, cryptographic signatures, or privileged administrator verification are downstream acceptance gates and are never implied by internal checksum validation.
+> Checksum verification inside `PackageStreamVerifier` and `PackageArchiveWriter` is an **internal integrity guard** preventing partial writes, storage corruption, and truncation. **Out-of-band trust**, cryptographic signatures, or privileged administrator verification are downstream acceptance gates and are never implied by internal checksum validation.
 
 ---
 
@@ -22,8 +23,8 @@
 A SiteConvoy migration package contains regular file payloads organized under strict approved root directories:
 
 ```
-package.zip (future container)
-├── manifest.json            <-- Package metadata, mode, topology, and entry hashes
+package.zip
+├── manifest.json            <-- Package metadata, mode, topology, and entry hashes (canonical byte order)
 ├── checksums.sha256         <-- Redundant standard sha256sum listing (future)
 ├── database/                <-- Isolated table SQL dumps
 │   ├── wp_posts.sql
@@ -109,11 +110,56 @@ Entries in `PackageManifest` are sorted canonically by `path` using standard byt
 
 ---
 
-## 5. What Is NOT Built in M2-001
+## 5. Safe Deterministic ZIP Package Writer (`PackageArchiveWriter`)
 
-The following capabilities are explicitly outside the scope of `SITECONVOY-M2-001`:
-- **Archive Creation & Extraction**: No ZIP or TAR archives are created, opened, or extracted.
-- **Data Export & Import**: No SQL queries, database rows, or option writes are executed.
-- **Filesystem Mutations**: Production code performs zero file writes or staging directory creation.
-- **URL Rewriting & Deserialization**: No search-replace or PHP object deserialization.
-- **Execution & Orchestration**: The manifest and verifier are inert data structures; they do not trigger background jobs, REST endpoints, or migration cutover.
+`SiteConvoy\Package\PackageArchiveWriter` implements SiteConvoy's first real, externally openable ZIP archive generation facility:
+
+### Key Design & Safety Invariants
+1. **Native ZIP / libzip Compatibility**:
+   - Generates standard `.zip` files readable by any standard operating system or unzip utility (`unzip`, Windows Explorer, Archive Utility).
+   - Checks for PHP `ZipArchive` extension capability up front (`ZIP_CAPABILITY_UNAVAILABLE`).
+2. **Bounded-Memory Staging**:
+   - Caller-supplied streams are read chunk-by-chunk (`64 KB`) and staged into individual private temporary files on disk. Payloads are never held in memory.
+   - Streaming SHA-256 and byte size are computed and verified during staging. Any deviation triggers immediate cleanup and failure (`CHECKSUM_MISMATCH`, `SIZE_MISMATCH`).
+3. **Deterministic Metadata**:
+   - Members are added in deterministic sorted order (`manifest.json` first, followed by payload paths in byte-order).
+   - Fixed epoch mtime (`1767225600`, representing `2026-01-01 00:00:00 UTC`) is assigned to every member via `setMtimeName()`.
+   - Fixed compression method (`ZipArchive::CM_STORE`) is enforced via `setCompressionName()` to guarantee reproducible, bit-for-bit identical ZIP archives across platforms regardless of zlib compression variations.
+   - Deterministic UNIX regular-file external attributes (`0100644 << 16` / `020151000000`) are explicitly normalized across all members via `setExternalAttributesName()`.
+4. **Safe Staging, Restricted Permissions & Platform Containment**:
+   - Requires an explicit, private temporary staging parent directory (`0700`).
+   - The writer never recursively deletes caller workspaces. It allocates an exclusive, randomly named per-operation subdirectory (`0700`, `sc_op_<nonce>`).
+   - **Supported Platform Policy (Fail-Closed on Windows)**:
+     - **POSIX / Linux Hosts**: Fully supported. Restrictive file permissions (`0600`, owner read/write only) are explicitly enforced on temporary ZIP archives before publication and re-enforced at the published destination. Permissions are strictly verified via `fileperms()`, preventing data exposure under permissive process umasks.
+     - **Windows Hosts**: Explicitly fail closed with structured error `SECURE_FILESYSTEM_PERMISSIONS_UNAVAILABLE` before staging directories are created or payloads are written. Because Windows `chmod` controls only the read-only file attribute and cannot verify or enforce fine-grained NTFS Access Control Lists (ACLs), package writer operations are disabled on Windows environments until verified ACL enforcement is implemented.
+   - Staging files use opaque random names (`stg_<nonce>.tmp`) &mdash; never derived from manifest relative paths &mdash; eliminating symlink-following and traversal risks within the staging workspace.
+   - Symlinks for output destination, staging parent, and any of their ancestor directory components are strictly prohibited (`SYMLINK_PATH_PROHIBITED`).
+5. **Independent Pre-Publication Verification**:
+   - The archive is built in a temporary file (`sc_pkg_<nonce>.tmp`) inside the exclusive operation subdirectory.
+   - Once closed, the finalized archive is reopened independently:
+     - Member count must match `manifest.json` + declared entries exactly.
+     - Members are enumerated: directory members (`/`), symbolic links (Unix attribute `0120000`), and non-regular file members are rejected (`ZIP_DIRECTORY_MEMBER_PROHIBITED`, `ZIP_SYMLINK_MEMBER_PROHIBITED`, `ZIP_NONREGULAR_MEMBER_PROHIBITED`). Missing or unreadable member external attributes fail closed (`ZIP_STAT_FAILED`).
+     - Every member's timestamp and storage mode are verified (`mtime === 1767225600`, `comp_method === ZipArchive::CM_STORE`), failing with `ZIP_MEMBER_METADATA_MISMATCH` if altered.
+     - Canonical member order (`manifest.json` and payload paths sorted in byte order) is enforced (`ZIP_MEMBER_ORDER_MISMATCH`).
+     - Embedded `manifest.json` has a bounded maximum size limit (`2 MB`, `MAX_MANIFEST_SIZE`) to prevent memory exhaustion attacks (`MANIFEST_EXCEEDS_SIZE_LIMIT`).
+     - Embedded `manifest.json` raw bytes are compared directly against the deterministic canonical serialization of the validated supplied manifest, preventing subtle JSON object/array normalization tampering (`FINAL_MANIFEST_MISMATCH`).
+     - Embedded `manifest.json` is strictly validated via `PackageManifest::from_array()` and confirmed to match the caller's expected manifest exactly (`mode`, `source`, and entry records), preventing metadata injection or tampering (`FINAL_MANIFEST_MISMATCH`).
+     - Each member stream is read and its SHA-256 checksum and byte size are re-verified independently before publication.
+     - Verified archive size and SHA-256 digest are computed directly from the private temporary archive prior to publication (`ARCHIVE_STAT_FAILED`, `ARCHIVE_DIGEST_FAILED`), preventing TOCTOU races.
+6. **Atomic No-Clobber Publication & Filesystem Boundary**:
+   - Requires that the staging workspace and destination directory reside on the same filesystem device (`stat['dev']`); cross-device publication fails closed (`ATOMIC_PUBLICATION_UNAVAILABLE`).
+   - Destination file or dangling link must not exist; `PackageArchiveWriter` refuses to overwrite existing files (`DESTINATION_ALREADY_EXISTS`).
+   - Publication uses atomic hardlink creation (`link()`) followed by unlinking the temporary source archive. Because `link()` fails immediately if the target already exists, this eliminates TOCTOU overwrite windows and race conditions without unsafe partial file copying.
+7. **Failure Cleanup Guarantee**:
+   - Any failure during staging, ZIP packing, verification, or publication cleans up only the writer-owned staging files, temporary archives, and the exclusive per-operation subdirectory. Caller files, sentinels, and pre-existing workspace contents remain untouched.
+
+---
+
+## 6. What Is NOT Built in M2-002
+
+The following capabilities are explicitly outside the scope of `SITECONVOY-M2-002`:
+- **Archive Extraction & Ingestion**: No ZIP or TAR archives are uncompressed or unpacked onto the target filesystem.
+- **Real Site Data Export / Discovery**: No SQL export from WordPress tables, media library file scanning, or options export. All payloads in M2-002 are caller-supplied synthetic streams.
+- **Database & Option Mutations**: The writer does not mutate `wp_options`, `wp_posts`, or any WordPress database table.
+- **REST / WP-CLI Endpoints & Background Cron**: The writer is an internal PHP class without web-accessible endpoints or scheduled cron hooks.
+- **Deployment & Migration Cutover**: No sites are created, deleted, or activated.

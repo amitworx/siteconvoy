@@ -46,6 +46,8 @@ require_once SITECONVOY_PATH . 'includes/Package/PackageManifestValidator.php';
 require_once SITECONVOY_PATH . 'includes/Package/PackageManifest.php';
 require_once SITECONVOY_PATH . 'includes/Package/PackageVerificationResult.php';
 require_once SITECONVOY_PATH . 'includes/Package/PackageStreamVerifier.php';
+require_once SITECONVOY_PATH . 'includes/Package/PackageArchiveWriterResult.php';
+require_once SITECONVOY_PATH . 'includes/Package/PackageArchiveWriter.php';
 
 /**
  * Inert plugin initialization hook.
