@@ -750,16 +750,150 @@ class PackageArchiveStagerUnitTest extends TestCase {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
 		file_put_contents( $sentinel, 'caller data' );
 
-		// Create archive with mismatched declared size so copy fails during stream extraction.
+		// Valid manifest and ZIP so inspector passes.
 		$payloads = array( 'database/schema.sql' => 'CORRUPTED' );
-		$entries  = array(
-			array(
-				'path'   => 'database/schema.sql',
-				'size'   => 999999, // Mismatched size.
-				'sha256' => hash( 'sha256', 'CORRUPTED' ),
-				'type'   => 'regular',
-			),
-		);
+		$this->create_synthetic_archive( $archive_path, null, $payloads );
+		$expected_hash = hash_file( 'sha256', $archive_path );
+
+		// Stager subclass that injects a failure during writing (after files were created).
+		$stager = new class() extends PackageArchiveStager {
+			/**
+			 * Stub windows platform check.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
+
+			/**
+			 * Stub staging parent privacy check.
+			 *
+			 * @param string $path Path.
+			 * @return bool
+			 */
+			protected function is_staging_parent_private( $path ) {
+				return true;
+			}
+
+			/**
+			 * Inject fault during stream copying.
+			 *
+			 * @param resource $source Source stream.
+			 * @param resource $dest   Dest stream.
+			 * @param int      $size   Expected size.
+			 * @param string   $hash   Expected hash.
+			 * @return array{success: bool, bytes_read: int, error_code: string, error_message: string}
+			 */
+			protected function copy_member_stream( $source, $dest, $size, $hash ) {
+				// Write some bytes to ensure file exists on disk.
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+				fwrite( $dest, 'partial' );
+				return array(
+					'success'       => false,
+					'bytes_read'    => 7,
+					'error_code'    => 'INJECTED_STREAM_FAILURE',
+					'error_message' => 'Injected stream copy failure for testing.',
+				);
+			}
+		};
+
+		$result = $stager->stage( $archive_path, $staging_dir, $expected_hash );
+		$this->assertFalse( $result->is_success() );
+		$this->assertSame( 'INJECTED_STREAM_FAILURE', $result->get_error_code() );
+
+		// Caller sentinel must still exist.
+		$this->assertFileExists( $sentinel );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		$this->assertSame( 'caller data', file_get_contents( $sentinel ) );
+
+		// Only sentinel should remain in staging_dir (operation directory and staged files completely removed).
+		$remaining = array_values( array_diff( scandir( $staging_dir ), array( '.', '..' ) ) );
+		$this->assertSame( array( 'sentinel.txt' ), $remaining );
+	}
+
+	/**
+	 * Test failure cleanup when unlink or rmdir fails returns manual-recovery error with recovery locator.
+	 */
+	public function test_failure_cleanup_returns_manual_recovery_error_when_cleanup_fails() {
+		$archive_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'cleanup_fail.zip';
+		$staging_dir  = $this->temp_dir . DIRECTORY_SEPARATOR . 'staging';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
+		mkdir( $staging_dir, 0700, true );
+
+		$this->create_synthetic_archive( $archive_path, null, array( 'database/schema.sql' => 'SELECT 1;' ) );
+		$expected_hash = hash_file( 'sha256', $archive_path );
+
+		$stager = new class() extends PackageArchiveStager {
+			/**
+			 * Stub windows platform check.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
+
+			/**
+			 * Stub staging parent privacy check.
+			 *
+			 * @param string $path Path.
+			 * @return bool
+			 */
+			protected function is_staging_parent_private( $path ) {
+				return true;
+			}
+
+			/**
+			 * Inject fault during stream copying.
+			 *
+			 * @param resource $source Source stream.
+			 * @param resource $dest   Dest stream.
+			 * @param int      $size   Expected size.
+			 * @param string   $hash   Expected hash.
+			 * @return array{success: bool, bytes_read: int, error_code: string, error_message: string}
+			 */
+			protected function copy_member_stream( $source, $dest, $size, $hash ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+				fwrite( $dest, 'data' );
+				return array(
+					'success'       => false,
+					'bytes_read'    => 4,
+					'error_code'    => 'INJECTED_STREAM_FAILURE',
+					'error_message' => 'Injected stream copy failure for testing.',
+				);
+			}
+
+			/**
+			 * Simulate unlink failure.
+			 *
+			 * @param string $file File path.
+			 * @return bool
+			 */
+			protected function unlink_file( $file ) {
+				return false;
+			}
+		};
+
+		$result = $stager->stage( $archive_path, $staging_dir, $expected_hash );
+		$this->assertFalse( $result->is_success() );
+		$this->assertSame( 'MANUAL_RECOVERY_REQUIRED', $result->get_error_code() );
+		$this->assertNotEmpty( $result->get_recovery_locator() );
+	}
+
+	/**
+	 * Test successful staging of an archive with a valid empty manifest (zero entries).
+	 */
+	public function test_stage_succeeds_with_empty_manifest() {
+		if ( $this->is_windows() ) {
+			$this->markTestSkipped( 'POSIX only test.' );
+		}
+
+		$archive_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'empty.zip';
+		$staging_dir  = $this->temp_dir . DIRECTORY_SEPARATOR . 'staging';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
+		mkdir( $staging_dir, 0700, true );
+
 		$manifest = new PackageManifest(
 			MigrationMode::STANDALONE_TO_SUBSITE,
 			array(
@@ -767,10 +901,34 @@ class PackageArchiveStagerUnitTest extends TestCase {
 				'site_id'      => 1,
 				'base_prefix'  => 'wp_',
 			),
-			$entries
+			array() // Zero entries.
 		);
 
-		$this->create_synthetic_archive( $archive_path, $manifest, $payloads );
+		$this->create_synthetic_archive( $archive_path, $manifest, array() );
+		$expected_hash = hash_file( 'sha256', $archive_path );
+
+		$stager = new PackageArchiveStager();
+		$result = $stager->stage( $archive_path, $staging_dir, $expected_hash );
+
+		$this->assertTrue( $result->is_success(), 'Stage failed: ' . $result->get_error_code() . ': ' . $result->get_error_message() );
+		$this->assertSame( 0, $result->get_staged_count() );
+		$this->assertSame( 0, $result->get_staged_bytes() );
+		$this->assertEmpty( $result->get_staged_ledger() );
+
+		// The operation root must exist and remain private.
+		$root = $result->get_staging_root();
+		$this->assertNotEmpty( $root );
+		$this->assertTrue( is_dir( $root ) );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fileperms
+		$this->assertSame( 0700, fileperms( $root ) & 0777 );
+	}
+
+	/**
+	 * Test staging parent inside WordPress root or public content/uploads is rejected.
+	 */
+	public function test_stage_fails_when_staging_parent_inside_wordpress_paths() {
+		$archive_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'test.zip';
+		$this->create_synthetic_archive( $archive_path, null, array( 'database/schema.sql' => 'SELECT 1;' ) );
 		$expected_hash = hash_file( 'sha256', $archive_path );
 
 		$stager = new class() extends PackageArchiveStager {
@@ -794,17 +952,93 @@ class PackageArchiveStagerUnitTest extends TestCase {
 			}
 		};
 
+		// Test with ABSPATH if defined.
+		if ( defined( 'ABSPATH' ) ) {
+			$wp_staging = rtrim( ABSPATH, '/\\' ) . DIRECTORY_SEPARATOR . 'staging_test';
+			if ( ! is_dir( $wp_staging ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
+				mkdir( $wp_staging, 0700, true );
+			}
+			try {
+				$result = $stager->stage( $archive_path, $wp_staging, $expected_hash );
+				$this->assertFalse( $result->is_success() );
+				$this->assertSame( 'STAGING_PARENT_IN_PUBLIC_LOCATION', $result->get_error_code() );
+			} finally {
+				if ( is_dir( $wp_staging ) ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
+					rmdir( $wp_staging );
+				}
+			}
+		}
+	}
+
+	/**
+	 * Test detection of source archive swap immediately before writing.
+	 */
+	public function test_stage_fails_when_source_archive_swapped_before_staging() {
+		$archive_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'test.zip';
+		$staging_dir  = $this->temp_dir . DIRECTORY_SEPARATOR . 'staging';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
+		mkdir( $staging_dir, 0700, true );
+
+		$this->create_synthetic_archive( $archive_path, null, array( 'database/schema.sql' => 'SELECT 1;' ) );
+		$expected_hash = hash_file( 'sha256', $archive_path );
+
+		$stager = new class( $archive_path ) extends PackageArchiveStager {
+			/**
+			 * Archive to swap.
+			 *
+			 * @var string
+			 */
+			private $archive_to_swap;
+
+			/**
+			 * Constructor.
+			 *
+			 * @param string $path Archive path.
+			 */
+			public function __construct( $path ) {
+				parent::__construct();
+				$this->archive_to_swap = $path;
+			}
+
+			/**
+			 * Stub windows platform check.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
+
+			/**
+			 * Stub staging parent privacy check.
+			 *
+			 * @param string $path Path.
+			 * @return bool
+			 */
+			protected function is_staging_parent_private( $path ) {
+				return true;
+			}
+
+			/**
+			 * Hook after inspector before reopening zip to swap archive content.
+			 */
+			protected function before_reopen_zip() {
+				// Swap archive file content.
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+				file_put_contents( $this->archive_to_swap, 'SWAPPED_CONTENT' );
+				clearstatcache( true, $this->archive_to_swap );
+			}
+		};
+
 		$result = $stager->stage( $archive_path, $staging_dir, $expected_hash );
 		$this->assertFalse( $result->is_success() );
+		$this->assertSame( 'ARCHIVE_CHANGED_BEFORE_STAGING', $result->get_error_code() );
 
-		// Caller sentinel must still exist.
-		$this->assertFileExists( $sentinel );
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
-		$this->assertSame( 'caller data', file_get_contents( $sentinel ) );
-
-		// Only sentinel should remain in staging_dir.
-		$remaining = array_values( array_diff( scandir( $staging_dir ), array( '.', '..' ) ) );
-		$this->assertSame( array( 'sentinel.txt' ), $remaining );
+		// Staging dir should be cleaned up.
+		$items = scandir( $staging_dir );
+		$this->assertSame( array( '.', '..' ), $items );
 	}
 
 	/**

@@ -83,17 +83,25 @@ class PackageArchiveStagingResult {
 	private $error_message;
 
 	/**
+	 * Safe recovery locator for manual cleanup when automated cleanup cannot be verified.
+	 *
+	 * @var string
+	 */
+	private $recovery_locator;
+
+	/**
 	 * Constructor.
 	 *
-	 * @param bool                  $success        Success flag.
-	 * @param string                $staging_root   Absolute path to exclusive staging directory.
-	 * @param PackageManifest|null  $manifest       Validated package manifest.
-	 * @param int                   $staged_count   Number of staged payload files.
-	 * @param int                   $staged_bytes   Total bytes written.
-	 * @param string                $archive_sha256 Archive SHA-256 checksum.
-	 * @param array<string, string> $staged_ledger  Relative path to absolute path ledger.
-	 * @param string                $error_code     Error code.
-	 * @param string                $error_message  Error message.
+	 * @param bool                  $success          Success flag.
+	 * @param string                $staging_root     Absolute path to exclusive staging directory.
+	 * @param PackageManifest|null  $manifest         Validated package manifest.
+	 * @param int                   $staged_count     Number of staged payload files.
+	 * @param int                   $staged_bytes     Total bytes written.
+	 * @param string                $archive_sha256   Archive SHA-256 checksum.
+	 * @param array<string, string> $staged_ledger    Relative path to absolute path ledger.
+	 * @param string                $error_code       Error code.
+	 * @param string                $error_message    Error message.
+	 * @param string                $recovery_locator Recovery locator for manual recovery.
 	 */
 	public function __construct(
 		$success,
@@ -104,17 +112,19 @@ class PackageArchiveStagingResult {
 		$archive_sha256 = '',
 		array $staged_ledger = array(),
 		$error_code = '',
-		$error_message = ''
+		$error_message = '',
+		$recovery_locator = ''
 	) {
-		$this->success        = (bool) $success;
-		$this->staging_root   = (string) $staging_root;
-		$this->manifest       = $manifest;
-		$this->staged_count   = (int) $staged_count;
-		$this->staged_bytes   = (int) $staged_bytes;
-		$this->archive_sha256 = (string) $archive_sha256;
-		$this->staged_ledger  = $staged_ledger;
-		$this->error_code     = (string) $error_code;
-		$this->error_message  = (string) $error_message;
+		$this->success          = (bool) $success;
+		$this->staging_root     = (string) $staging_root;
+		$this->manifest         = $manifest;
+		$this->staged_count     = (int) $staged_count;
+		$this->staged_bytes     = (int) $staged_bytes;
+		$this->archive_sha256   = (string) $archive_sha256;
+		$this->staged_ledger    = $staged_ledger;
+		$this->error_code       = (string) $error_code;
+		$this->error_message    = (string) $error_message;
+		$this->recovery_locator = (string) $recovery_locator;
 	}
 
 	/**
@@ -138,6 +148,7 @@ class PackageArchiveStagingResult {
 			$archive_sha256,
 			$staged_ledger,
 			'',
+			'',
 			''
 		);
 	}
@@ -145,11 +156,12 @@ class PackageArchiveStagingResult {
 	/**
 	 * Create a failed staging result.
 	 *
-	 * @param string $error_code    Sanitized error code.
-	 * @param string $error_message Sanitized error message.
+	 * @param string $error_code       Sanitized error code.
+	 * @param string $error_message    Sanitized error message.
+	 * @param string $recovery_locator Safe locator for manual recovery.
 	 * @return self
 	 */
-	public static function failure( $error_code, $error_message ) {
+	public static function failure( $error_code, $error_message, $recovery_locator = '' ) {
 		return new self(
 			false,
 			'',
@@ -159,7 +171,8 @@ class PackageArchiveStagingResult {
 			'',
 			array(),
 			$error_code,
-			$error_message
+			$error_message,
+			$recovery_locator
 		);
 	}
 
@@ -242,5 +255,14 @@ class PackageArchiveStagingResult {
 	 */
 	public function get_error_message() {
 		return $this->error_message;
+	}
+
+	/**
+	 * Get safe manual recovery locator.
+	 *
+	 * @return string
+	 */
+	public function get_recovery_locator() {
+		return $this->recovery_locator;
 	}
 }

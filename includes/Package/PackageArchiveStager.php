@@ -158,6 +158,14 @@ class PackageArchiveStager {
 			);
 		}
 
+		// Reject staging parent if located inside known WordPress install or public content paths.
+		if ( $this->is_staging_parent_in_public_path( $trusted_staging_parent ) ) {
+			return PackageArchiveStagingResult::failure(
+				'STAGING_PARENT_IN_PUBLIC_LOCATION',
+				'Trusted staging parent must not reside inside WordPress install or public content locations.'
+			);
+		}
+
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_is_writable
 		if ( ! is_writable( $trusted_staging_parent ) ) {
 			return PackageArchiveStagingResult::failure(
@@ -171,6 +179,14 @@ class PackageArchiveStager {
 			return PackageArchiveStagingResult::failure(
 				'STAGING_PARENT_NOT_PRIVATE',
 				'Trusted staging parent directory must have restricted private permissions (0700).'
+			);
+		}
+
+		// Verify ownership of staging parent when available.
+		if ( ! $this->verify_staging_parent_ownership( $trusted_staging_parent ) ) {
+			return PackageArchiveStagingResult::failure(
+				'STAGING_PARENT_OWNERSHIP_UNVERIFIED',
+				'Trusted staging parent ownership could not be verified for the current effective process.'
 			);
 		}
 
@@ -201,13 +217,24 @@ class PackageArchiveStager {
 			);
 		}
 
-		// Capture archive file identity stat before extraction.
+		// Hook seam before reopening ZIP archive (test seam for swap injection).
+		$this->before_reopen_zip();
+
+		// Immediate revalidation of source archive identity and digest before opening/writing.
 		clearstatcache( true, $archive_path );
-		$initial_archive_stat = stat( $archive_path );
-		if ( false === $initial_archive_stat || ! isset( $initial_archive_stat['size'] ) ) {
+		$mid_archive_stat = stat( $archive_path );
+		if ( false === $mid_archive_stat || ! isset( $mid_archive_stat['size'] ) ) {
 			return PackageArchiveStagingResult::failure(
 				'ARCHIVE_STAT_FAILED',
 				'Failed to stat archive file before staging.'
+			);
+		}
+
+		$mid_sha256 = hash_file( 'sha256', $archive_path );
+		if ( false === $mid_sha256 || ! hash_equals( $expected_archive_sha256, $mid_sha256 ) ) {
+			return PackageArchiveStagingResult::failure(
+				'ARCHIVE_CHANGED_BEFORE_STAGING',
+				'Archive file altered between inspection and extraction start.'
 			);
 		}
 
@@ -217,6 +244,7 @@ class PackageArchiveStager {
 		$created_dirs       = array();
 		$staged_ledger      = array();
 		$total_staged_bytes = 0;
+		$staging_completed  = false;
 
 		for ( $attempt = 0; $attempt < 5; $attempt++ ) {
 			try {
@@ -243,9 +271,14 @@ class PackageArchiveStager {
 			);
 		}
 
-		// Enforce 0700 permissions explicitly regardless of process umask.
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod, WordPress.PHP.NoSilencedErrors.Discouraged
-		@chmod( $op_subdir, 0700 );
+		// Enforce and verify 0700 permissions explicitly regardless of process umask.
+		if ( ! $this->enforce_directory_mode( $op_subdir, 0700 ) ) {
+			$this->cleanup_staging_artifacts( $created_files, $created_dirs, $op_subdir );
+			return PackageArchiveStagingResult::failure(
+				'PERMISSIONS_ENFORCEMENT_FAILED',
+				'Failed to enforce 0700 permissions on operation root.'
+			);
+		}
 
 		try {
 			// 8. Open ZIP archive in read-only mode for member streaming.
@@ -330,114 +363,42 @@ class PackageArchiveStager {
 					}
 					$created_files[] = $dest_path;
 
-					// Enforce 0600 on created file before payload bytes are written.
-					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod, WordPress.PHP.NoSilencedErrors.Discouraged
-					@chmod( $dest_path, 0600 );
-
-					$hash_ctx   = hash_init( 'sha256' );
-					$bytes_read = 0;
-					$write_fail = false;
-
-					while ( ! feof( $member_stream ) ) {
-						// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread
-						$chunk = fread( $member_stream, $this->chunk_size );
-						if ( false === $chunk ) {
-							// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-							fclose( $dest_handle );
-							// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-							fclose( $member_stream );
-							return PackageArchiveStagingResult::failure(
-								'STREAM_READ_ERROR',
-								'Encountered error while reading payload member stream.'
-							);
-						}
-
-						if ( '' === $chunk ) {
-							if ( ! feof( $member_stream ) ) {
-								// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-								fclose( $dest_handle );
-								// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-								fclose( $member_stream );
-								return PackageArchiveStagingResult::failure(
-									'STREAM_READ_STALLED',
-									'Stream read stalled before reaching declared length.'
-								);
-							}
-							break;
-						}
-
-						$chunk_len   = strlen( $chunk );
-						$bytes_read += $chunk_len;
-
-						if ( $bytes_read > $expected_size ) {
-							// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-							fclose( $dest_handle );
-							// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-							fclose( $member_stream );
-							return PackageArchiveStagingResult::failure(
-								'SIZE_MISMATCH',
-								'Extracted member stream exceeded declared manifest size.'
-							);
-						}
-
-						hash_update( $hash_ctx, $chunk );
-
-						// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
-						$written = fwrite( $dest_handle, $chunk );
-						if ( $written !== $chunk_len ) {
-							$write_fail = true;
-							break;
-						}
+					// Enforce and verify 0600 on created file BEFORE payload bytes are written.
+					if ( ! $this->enforce_file_mode( $dest_path, 0600 ) ) {
+						// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+						fclose( $dest_handle );
+						// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+						fclose( $member_stream );
+						return PackageArchiveStagingResult::failure(
+							'PERMISSIONS_ENFORCEMENT_FAILED',
+							'Failed to verify 0600 private file permissions before writing payload.'
+						);
 					}
 
+					// Copy member stream in bounded memory chunks and verify checksum.
+					$copy_result = $this->copy_member_stream( $member_stream, $dest_handle, $expected_size, $expected_hash );
 					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $dest_handle );
 					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $member_stream );
 
-					if ( $write_fail ) {
+					if ( ! $copy_result['success'] ) {
 						return PackageArchiveStagingResult::failure(
-							'STAGING_WRITE_FAILED',
-							'Failed to write complete payload chunk to staging file.'
-						);
-					}
-
-					if ( $bytes_read !== $expected_size ) {
-						return PackageArchiveStagingResult::failure(
-							'SIZE_MISMATCH',
-							'Extracted member size does not match declared manifest size.'
-						);
-					}
-
-					$actual_hash = hash_final( $hash_ctx );
-					if ( ! hash_equals( $expected_hash, strtolower( $actual_hash ) ) ) {
-						return PackageArchiveStagingResult::failure(
-							'CHECKSUM_MISMATCH',
-							'Extracted member SHA-256 does not match declared manifest checksum.'
+							$copy_result['error_code'],
+							$copy_result['error_message']
 						);
 					}
 
 					// Re-verify file mode after write on POSIX.
-					if ( 'WIN' !== strtoupper( substr( PHP_OS, 0, 3 ) ) ) {
-						clearstatcache( true, $dest_path );
-						// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fileperms
-						$actual_perms = fileperms( $dest_path );
-						if ( false === $actual_perms || ( $actual_perms & 0777 ) !== 0600 ) {
-							// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod
-							chmod( $dest_path, 0600 );
-							clearstatcache( true, $dest_path );
-							// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fileperms
-							if ( ( fileperms( $dest_path ) & 0777 ) !== 0600 ) {
-								return PackageArchiveStagingResult::failure(
-									'PERMISSIONS_ENFORCEMENT_FAILED',
-									'Failed to verify 0600 private file permissions on staged file.'
-								);
-							}
-						}
+					if ( ! $this->enforce_file_mode( $dest_path, 0600 ) ) {
+						return PackageArchiveStagingResult::failure(
+							'PERMISSIONS_ENFORCEMENT_FAILED',
+							'Failed to verify 0600 private file permissions on staged file after write.'
+						);
 					}
 
 					$staged_ledger[ $rel_path ] = $dest_path;
-					$total_staged_bytes        += $bytes_read;
+					$total_staged_bytes        += $copy_result['bytes_read'];
 				}
 			} finally {
 				$zip->close();
@@ -456,10 +417,10 @@ class PackageArchiveStager {
 				);
 			}
 
-			if ( (int) $final_archive_stat['size'] !== (int) $initial_archive_stat['size']
-				|| $final_archive_stat['mtime'] !== $initial_archive_stat['mtime']
-				|| ( isset( $initial_archive_stat['ino'], $final_archive_stat['ino'] ) && $final_archive_stat['ino'] !== $initial_archive_stat['ino'] )
-				|| ( isset( $initial_archive_stat['dev'], $final_archive_stat['dev'] ) && $final_archive_stat['dev'] !== $initial_archive_stat['dev'] )
+			if ( (int) $final_archive_stat['size'] !== (int) $mid_archive_stat['size']
+				|| $final_archive_stat['mtime'] !== $mid_archive_stat['mtime']
+				|| ( isset( $mid_archive_stat['ino'], $final_archive_stat['ino'] ) && $final_archive_stat['ino'] !== $mid_archive_stat['ino'] )
+				|| ( isset( $mid_archive_stat['dev'], $final_archive_stat['dev'] ) && $final_archive_stat['dev'] !== $mid_archive_stat['dev'] )
 			) {
 				return PackageArchiveStagingResult::failure(
 					'ARCHIVE_CHANGED_DURING_STAGING',
@@ -476,7 +437,9 @@ class PackageArchiveStager {
 				);
 			}
 
-			// Staging completed successfully.
+			// Mark operation as successfully completed.
+			$staging_completed = true;
+
 			return PackageArchiveStagingResult::success(
 				$op_subdir,
 				$manifest,
@@ -492,26 +455,138 @@ class PackageArchiveStager {
 				'An unexpected exception occurred during payload staging.'
 			);
 		} finally {
-			// On failure, cleanup exclusive operation directory and all created artifacts.
-			if ( ! isset( $final_sha256 ) || false === $final_sha256 || ! hash_equals( $expected_archive_sha256, $final_sha256 ) || empty( $staged_ledger ) || count( $staged_ledger ) !== count( $manifest->get_entries() ) ) {
-				$this->cleanup_staging_artifacts( $created_files, $created_dirs, $op_subdir );
+			// On any failure after workspace allocation, execute verified cleanup.
+			if ( ! $staging_completed ) {
+				$cleanup_ok = $this->cleanup_staging_artifacts( $created_files, $created_dirs, $op_subdir );
+				if ( ! $cleanup_ok ) {
+					// Cleanup failed; overwrite or return distinct manual recovery error.
+					return PackageArchiveStagingResult::failure(
+						'MANUAL_RECOVERY_REQUIRED',
+						'Staging failed and automated cleanup could not be fully verified.',
+						(string) $op_subdir
+					);
+				}
 			}
 		}
 	}
 
 	/**
-	 * Clean up operation-owned files and directories.
+	 * Copy a member stream to destination file in bounded memory chunks and verify SHA-256 checksum (test seam).
+	 *
+	 * @param resource $member_stream Source member stream.
+	 * @param resource $dest_handle   Destination file handle.
+	 * @param int      $expected_size Expected payload size.
+	 * @param string   $expected_hash Expected SHA-256 hash.
+	 * @return array{success: bool, bytes_read: int, error_code: string, error_message: string}
+	 */
+	protected function copy_member_stream( $member_stream, $dest_handle, $expected_size, $expected_hash ) {
+		$hash_ctx   = hash_init( 'sha256' );
+		$bytes_read = 0;
+		$write_fail = false;
+
+		while ( ! feof( $member_stream ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread
+			$chunk = fread( $member_stream, $this->chunk_size );
+			if ( false === $chunk ) {
+				return array(
+					'success'       => false,
+					'bytes_read'    => $bytes_read,
+					'error_code'    => 'STREAM_READ_ERROR',
+					'error_message' => 'Encountered error while reading payload member stream.',
+				);
+			}
+
+			if ( '' === $chunk ) {
+				if ( ! feof( $member_stream ) ) {
+					return array(
+						'success'       => false,
+						'bytes_read'    => $bytes_read,
+						'error_code'    => 'STREAM_READ_STALLED',
+						'error_message' => 'Stream read stalled before reaching declared length.',
+					);
+				}
+				break;
+			}
+
+			$chunk_len   = strlen( $chunk );
+			$bytes_read += $chunk_len;
+
+			if ( $bytes_read > $expected_size ) {
+				return array(
+					'success'       => false,
+					'bytes_read'    => $bytes_read,
+					'error_code'    => 'SIZE_MISMATCH',
+					'error_message' => 'Extracted member stream exceeded declared manifest size.',
+				);
+			}
+
+			hash_update( $hash_ctx, $chunk );
+
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+			$written = fwrite( $dest_handle, $chunk );
+			if ( $written !== $chunk_len ) {
+				$write_fail = true;
+				break;
+			}
+		}
+
+		if ( $write_fail ) {
+			return array(
+				'success'       => false,
+				'bytes_read'    => $bytes_read,
+				'error_code'    => 'STAGING_WRITE_FAILED',
+				'error_message' => 'Failed to write complete payload chunk to staging file.',
+			);
+		}
+
+		if ( $bytes_read !== $expected_size ) {
+			return array(
+				'success'       => false,
+				'bytes_read'    => $bytes_read,
+				'error_code'    => 'SIZE_MISMATCH',
+				'error_message' => 'Extracted member size does not match declared manifest size.',
+			);
+		}
+
+		$actual_hash = hash_final( $hash_ctx );
+		if ( ! hash_equals( $expected_hash, strtolower( $actual_hash ) ) ) {
+			return array(
+				'success'       => false,
+				'bytes_read'    => $bytes_read,
+				'error_code'    => 'CHECKSUM_MISMATCH',
+				'error_message' => 'Extracted member SHA-256 does not match declared manifest checksum.',
+			);
+		}
+
+		return array(
+			'success'       => true,
+			'bytes_read'    => $bytes_read,
+			'error_code'    => '',
+			'error_message' => '',
+		);
+	}
+
+	/**
+	 * Clean up operation-owned files and directories and verify complete removal.
 	 *
 	 * @param array<int, string> $files Created files list.
 	 * @param array<int, string> $dirs  Created directories list (in creation order).
 	 * @param string|null        $root  Operation staging root directory.
+	 * @return bool True if all artifacts and root were confirmed removed; false otherwise.
 	 */
 	private function cleanup_staging_artifacts( array $files, array $dirs, $root ) {
+		$all_removed = true;
+
 		// Remove created files.
 		foreach ( $files as $file ) {
 			if ( file_exists( $file ) || is_link( $file ) ) {
-				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_unlink, WordPress.WP.AlternativeFunctions.unlink_unlink, WordPress.PHP.NoSilencedErrors.Discouraged
-				@unlink( $file );
+				if ( ! $this->unlink_file( $file ) ) {
+					$all_removed = false;
+				}
+				clearstatcache( true, $file );
+				if ( file_exists( $file ) || is_link( $file ) ) {
+					$all_removed = false;
+				}
 			}
 		}
 
@@ -519,16 +594,88 @@ class PackageArchiveStager {
 		$rev_dirs = array_reverse( $dirs );
 		foreach ( $rev_dirs as $dir ) {
 			if ( is_dir( $dir ) && ! is_link( $dir ) ) {
-				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir, WordPress.PHP.NoSilencedErrors.Discouraged
-				@rmdir( $dir );
+				if ( ! $this->rmdir_directory( $dir ) ) {
+					$all_removed = false;
+				}
+				clearstatcache( true, $dir );
+				if ( file_exists( $dir ) || is_link( $dir ) ) {
+					$all_removed = false;
+				}
 			}
 		}
 
 		// Remove operation root directory.
-		if ( null !== $root && is_dir( $root ) && ! is_link( $root ) ) {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir, WordPress.PHP.NoSilencedErrors.Discouraged
-			@rmdir( $root );
+		if ( null !== $root && ( is_dir( $root ) || is_link( $root ) ) ) {
+			if ( ! $this->rmdir_directory( $root ) ) {
+				$all_removed = false;
+			}
+			clearstatcache( true, $root );
+			if ( file_exists( $root ) || is_link( $root ) ) {
+				$all_removed = false;
+			}
 		}
+
+		return $all_removed;
+	}
+
+	/**
+	 * Unlink file (test seam).
+	 *
+	 * @param string $file File path.
+	 * @return bool
+	 */
+	protected function unlink_file( $file ) {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_unlink, WordPress.WP.AlternativeFunctions.unlink_unlink, WordPress.PHP.NoSilencedErrors.Discouraged
+		return @unlink( $file );
+	}
+
+	/**
+	 * Remove directory (test seam).
+	 *
+	 * @param string $dir Directory path.
+	 * @return bool
+	 */
+	protected function rmdir_directory( $dir ) {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir, WordPress.PHP.NoSilencedErrors.Discouraged
+		return @rmdir( $dir );
+	}
+
+	/**
+	 * Enforce and verify directory permission mode (test seam).
+	 *
+	 * @param string $dir  Directory path.
+	 * @param int    $mode Permission mode (e.g. 0700).
+	 * @return bool
+	 */
+	protected function enforce_directory_mode( $dir, $mode ) {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod, WordPress.PHP.NoSilencedErrors.Discouraged
+		@chmod( $dir, $mode );
+		if ( 'WIN' !== strtoupper( substr( PHP_OS, 0, 3 ) ) ) {
+			clearstatcache( true, $dir );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fileperms
+			$perms = fileperms( $dir );
+			return ( false !== $perms && ( $perms & 0777 ) === $mode );
+		}
+		return true;
+	}
+
+	/**
+	 * Enforce and verify file permission mode (test seam).
+	 *
+	 * @param string $file File path.
+	 * @param int    $mode Permission mode (e.g. 0600).
+	 * @return bool
+	 */
+	protected function enforce_file_mode( $file, $mode ) {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod, WordPress.PHP.NoSilencedErrors.Discouraged
+		@chmod( $file, $mode );
+		if ( 'WIN' !== strtoupper( substr( PHP_OS, 0, 3 ) ) ) {
+			clearstatcache( true, $file );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fileperms
+			$perms = fileperms( $file );
+			return ( false !== $perms && ( $perms & 0777 ) === $mode );
+		}
+		return true;
 	}
 
 	/**
@@ -555,12 +702,71 @@ class PackageArchiveStager {
 				if ( ! @mkdir( $current, 0700 ) && ! is_dir( $current ) ) {
 					return false;
 				}
-				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod, WordPress.PHP.NoSilencedErrors.Discouraged
-				@chmod( $current, 0700 );
+				if ( ! $this->enforce_directory_mode( $current, 0700 ) ) {
+					return false;
+				}
 				$created_dirs[] = $current;
 			}
 		}
 
+		return true;
+	}
+
+	/**
+	 * Check whether staging parent resides inside WordPress install or public content paths.
+	 *
+	 * @param string $staging_parent Staging parent path.
+	 * @return bool True if inside public/install location.
+	 */
+	private function is_staging_parent_in_public_path( $staging_parent ) {
+		$real_parent = realpath( $staging_parent );
+		if ( false === $real_parent ) {
+			$real_parent = $staging_parent;
+		}
+		$norm_parent = rtrim( str_replace( array( '/', '\\' ), DIRECTORY_SEPARATOR, $real_parent ), DIRECTORY_SEPARATOR );
+
+		// Check against ABSPATH if defined.
+		if ( defined( 'ABSPATH' ) && '' !== ABSPATH ) {
+			$real_abs = realpath( ABSPATH );
+			if ( false === $real_abs ) {
+				$real_abs = ABSPATH;
+			}
+			$norm_abs = rtrim( str_replace( array( '/', '\\' ), DIRECTORY_SEPARATOR, $real_abs ), DIRECTORY_SEPARATOR );
+			if ( '' !== $norm_abs && ( $norm_parent === $norm_abs || str_starts_with( $norm_parent, $norm_abs . DIRECTORY_SEPARATOR ) ) ) {
+				return true;
+			}
+		}
+
+		// Check against WP_CONTENT_DIR if defined.
+		if ( defined( 'WP_CONTENT_DIR' ) && '' !== WP_CONTENT_DIR ) {
+			$real_content = realpath( WP_CONTENT_DIR );
+			if ( false === $real_content ) {
+				$real_content = WP_CONTENT_DIR;
+			}
+			$norm_content = rtrim( str_replace( array( '/', '\\' ), DIRECTORY_SEPARATOR, $real_content ), DIRECTORY_SEPARATOR );
+			if ( '' !== $norm_content && ( $norm_parent === $norm_content || str_starts_with( $norm_parent, $norm_content . DIRECTORY_SEPARATOR ) ) ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * Verify effective ownership of staging parent directory (test seam).
+	 *
+	 * @param string $path Staging parent path.
+	 * @return bool
+	 */
+	protected function verify_staging_parent_ownership( $path ) {
+		if ( function_exists( 'posix_geteuid' ) ) {
+			clearstatcache( true, $path );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fileowner
+			$owner = fileowner( $path );
+			if ( false === $owner || posix_geteuid() !== $owner ) {
+				return false;
+			}
+		}
 		return true;
 	}
 
@@ -658,6 +864,13 @@ class PackageArchiveStager {
 	 * Hook called immediately after payload staging before final archive verification (test seam).
 	 */
 	protected function on_after_payload_staging() {
+		// No-op in production.
+	}
+
+	/**
+	 * Hook called immediately before reopening ZIP archive for extraction (test seam).
+	 */
+	protected function before_reopen_zip() {
 		// No-op in production.
 	}
 
