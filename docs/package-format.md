@@ -155,11 +155,43 @@ Entries in `PackageManifest` are sorted canonically by `path` using standard byt
 
 ---
 
-## 6. What Is NOT Built in M2-002
+## 6. Inbound Package Archive Inspector (`PackageArchiveInspector`)
 
-The following capabilities are explicitly outside the scope of `SITECONVOY-M2-002`:
-- **Archive Extraction & Ingestion**: No ZIP or TAR archives are uncompressed or unpacked onto the target filesystem.
-- **Real Site Data Export / Discovery**: No SQL export from WordPress tables, media library file scanning, or options export. All payloads in M2-002 are caller-supplied synthetic streams.
-- **Database & Option Mutations**: The writer does not mutate `wp_options`, `wp_posts`, or any WordPress database table.
-- **REST / WP-CLI Endpoints & Background Cron**: The writer is an internal PHP class without web-accessible endpoints or scheduled cron hooks.
+`SiteConvoy\Package\PackageArchiveInspector` implements SiteConvoy's independent, read-only inspection and verification gateway for incoming v1 ZIP migration packages:
+
+### Key Design & Safety Invariants
+1. **Read-Only Non-Destructive Inspection**:
+   - Accepts a local regular file path and inspects the archive strictly read-only (`ZipArchive::RDONLY` flag where available).
+   - Never writes to the local filesystem, extracts files (`extractTo()`), creates temporary staging workspaces, modifies file permissions, or deletes files.
+   - Zero persistence side-effects: no options, posts, or database tables are queried or modified.
+2. **Path and Platform Safety**:
+   - Inputs must be ordinary regular files. Rejects directories, devices, stream wrappers (`php://`, `phar://`, `file://`), symbolic link leaves, and paths with symlinked ancestors.
+   - Unlike `PackageArchiveWriter` which fails closed on Windows due to POSIX permissions requirements, `PackageArchiveInspector` is fully supported on Windows because it performs purely read-only operations and does not create new files.
+3. **Structure & Member Verification**:
+   - Enforces two-pass enumeration: first checks every member name for duplicates (`ZIP_DUPLICATE_MEMBER`) to prevent ZIP duplicate-entry alias attacks before opening any member streams.
+   - Exactly one `manifest.json` and declared payload entries under `database/`, `uploads/`, or `assets/` must be present. Rejects missing, unmanifested extra, directory (`/`), symbolic link (`0120000`), or non-regular file members.
+   - Enforces canonical member sort order: byte-sorted matching `manifest.json` and declared entries.
+   - Verifies deterministic fixed mtime (`1767225600`), STORE compression (`ZipArchive::CM_STORE`), and regular UNIX attributes (`0100644 << 16`).
+4. **Manifest Schema & Canonical Byte Equivalence**:
+   - Manifest size is bounded by the metadata safety limit (`2 MiB`, `MAX_MANIFEST_SIZE`) to prevent memory exhaustion attacks.
+   - Strictly validates JSON syntax and rejects duplicate JSON object keys (`MANIFEST_DUPLICATE_KEY`).
+   - Distinguishes JSON objects from arrays (ensuring `entries` is a JSON array).
+   - Validates schema and topology constraints via `PackageManifest::from_array()`.
+   - Compares raw manifest bytes byte-for-byte against deterministic canonical serialization (`JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE`), rejecting non-canonical formatting, whitespace, or key ordering.
+5. **Bounded-Memory Stream Verification**:
+   - Each payload member stream is read incrementally in 64 KB chunks, calculating SHA-256 and byte count.
+   - Memory consumption scales with chunk size + bounded manifest metadata, never with payload size.
+   - Total archive size and SHA-256 checksum are computed and returned in `PackageArchiveInspectionResult`.
+6. **Authentication vs Integrity Boundary**:
+   - Inspection proves format conformity and internal SHA-256 integrity only. It does **not** assert package authenticity, authorization, or trust.
+
+---
+
+## 7. What Is NOT Built in M2-003
+
+The following capabilities are explicitly outside the scope of `SITECONVOY-M2-003`:
+- **Archive Extraction & Ingestion**: No ZIP archives are uncompressed or unpacked onto the target filesystem.
+- **Migration Authorization & Trust Approval**: Inbound inspection does not authorize migration or approve cryptographic trust.
+- **Target Site Mutation**: No database tables are imported, altered, or created. No options or posts are written.
+- **REST / WP-CLI Endpoints & Background Cron**: The inspector is an internal PHP class without web-accessible endpoints or scheduled cron hooks.
 - **Deployment & Migration Cutover**: No sites are created, deleted, or activated.

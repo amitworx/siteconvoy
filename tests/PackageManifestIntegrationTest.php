@@ -18,6 +18,8 @@ use SiteConvoy\Package\PackageStreamVerifier;
 use SiteConvoy\Package\PackageVerificationResult;
 use SiteConvoy\Package\PackageArchiveWriter;
 use SiteConvoy\Package\PackageArchiveWriterResult;
+use SiteConvoy\Package\PackageArchiveInspector;
+use SiteConvoy\Package\PackageArchiveInspectionResult;
 
 /**
  * Class PackageManifestIntegrationTest
@@ -34,6 +36,8 @@ class PackageManifestIntegrationTest extends WP_UnitTestCase {
 		$this->assertTrue( class_exists( PackageVerificationResult::class ), 'PackageVerificationResult must be autoloaded.' );
 		$this->assertTrue( class_exists( PackageArchiveWriter::class ), 'PackageArchiveWriter must be autoloaded.' );
 		$this->assertTrue( class_exists( PackageArchiveWriterResult::class ), 'PackageArchiveWriterResult must be autoloaded.' );
+		$this->assertTrue( class_exists( PackageArchiveInspector::class ), 'PackageArchiveInspector must be autoloaded.' );
+		$this->assertTrue( class_exists( PackageArchiveInspectionResult::class ), 'PackageArchiveInspectionResult must be autoloaded.' );
 	}
 
 	/**
@@ -196,5 +200,78 @@ class PackageManifestIntegrationTest extends WP_UnitTestCase {
 
 		$this->assertSame( $initial_options_count, $final_options_count, 'No options may be written during archive write.' );
 		$this->assertSame( $initial_posts_count, $final_posts_count, 'No posts may be created during archive write.' );
+	}
+
+	/**
+	 * Test that inspecting a synthetic package in the WordPress runtime leaves zero database traces.
+	 */
+	public function test_package_archive_inspector_has_zero_persistence() {
+		global $wpdb;
+
+		$initial_options_count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->options}" );
+		$initial_posts_count   = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->posts}" );
+
+		$temp_dir = sys_get_temp_dir() . '/sc_wp_insp_' . uniqid();
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
+		mkdir( $temp_dir, 0700, true );
+
+		$zip_path = $temp_dir . '/test.zip';
+		$content  = 'Synthetic SQL database dump for inspector integration test.';
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'network_id'   => null,
+				'base_prefix'  => $wpdb->base_prefix,
+			),
+			array(
+				array(
+					'path'   => 'database/posts.sql',
+					'size'   => strlen( $content ),
+					'sha256' => hash( 'sha256', $content ),
+					'type'   => 'regular',
+				),
+			)
+		);
+
+		$zip = new \ZipArchive();
+		$zip->open( $zip_path, \ZipArchive::CREATE | \ZipArchive::OVERWRITE );
+		$manifest_raw = wp_json_encode( $manifest, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
+
+		$zip->addFromString( 'database/posts.sql', $content );
+		$zip->setMtimeName( 'database/posts.sql', PackageArchiveInspector::DETERMINISTIC_MTIME );
+		$zip->setCompressionName( 'database/posts.sql', \ZipArchive::CM_STORE );
+		$zip->setExternalAttributesName( 'database/posts.sql', \ZipArchive::OPSYS_UNIX, PackageArchiveInspector::DETERMINISTIC_REGULAR_FILE_ATTR );
+
+		$zip->addFromString( 'manifest.json', $manifest_raw );
+		$zip->setMtimeName( 'manifest.json', PackageArchiveInspector::DETERMINISTIC_MTIME );
+		$zip->setCompressionName( 'manifest.json', \ZipArchive::CM_STORE );
+		$zip->setExternalAttributesName( 'manifest.json', \ZipArchive::OPSYS_UNIX, PackageArchiveInspector::DETERMINISTIC_REGULAR_FILE_ATTR );
+
+		$zip->close();
+
+		$inspector = new PackageArchiveInspector();
+		$result    = $inspector->inspect( $zip_path );
+
+		$this->assertTrue( $result->is_success(), 'Inspection failed: ' . $result->get_error_message() );
+		$this->assertSame( 1, $result->get_member_count() );
+
+		// Clean up files.
+		if ( file_exists( $zip_path ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_unlink, WordPress.WP.AlternativeFunctions.unlink_unlink
+			unlink( $zip_path );
+		}
+		if ( is_dir( $temp_dir ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
+			rmdir( $temp_dir );
+		}
+
+		// Assert zero database modifications.
+		$final_options_count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->options}" );
+		$final_posts_count   = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->posts}" );
+
+		$this->assertSame( $initial_options_count, $final_options_count, 'No options may be written during archive inspection.' );
+		$this->assertSame( $initial_posts_count, $final_posts_count, 'No posts may be created during archive inspection.' );
 	}
 }
