@@ -68,6 +68,14 @@ class PackageArchiveInspector {
 			);
 		}
 
+		// Require actual runtime ZipArchive::RDONLY capability (fail closed without it).
+		if ( ! $this->is_zip_readonly_available() ) {
+			return PackageArchiveInspectionResult::failure(
+				'ZIP_READONLY_UNAVAILABLE',
+				'Explicit read-only ZIP capability is unavailable in this environment.'
+			);
+		}
+
 		// 2. Validate input path.
 		if ( ! is_string( $archive_path ) || '' === trim( $archive_path ) ) {
 			return PackageArchiveInspectionResult::failure(
@@ -116,17 +124,24 @@ class PackageArchiveInspector {
 			);
 		}
 
-		// Stat archive file.
-		$archive_stat = stat( $archive_path );
-		if ( false === $archive_stat || ! isset( $archive_stat['size'] ) ) {
+		// Stat archive file and capture initial file identity snapshot.
+		$initial_stat = stat( $archive_path );
+		if ( false === $initial_stat || ! isset( $initial_stat['size'] ) ) {
 			return PackageArchiveInspectionResult::failure(
 				'ARCHIVE_STAT_FAILED',
 				'Failed to read archive file attributes.'
 			);
 		}
-		$archive_size = (int) $archive_stat['size'];
+		$archive_size = (int) $initial_stat['size'];
 
-		// Compute total archive SHA-256 digest via bounded streaming.
+		if ( $archive_size <= 0 ) {
+			return PackageArchiveInspectionResult::failure(
+				'INVALID_ARCHIVE_SIZE',
+				'Archive size must be a positive integer.'
+			);
+		}
+
+		// Compute initial archive SHA-256 digest via bounded streaming.
 		$archive_sha256 = $this->compute_file_sha256( $archive_path );
 		if ( null === $archive_sha256 ) {
 			return PackageArchiveInspectionResult::failure(
@@ -137,10 +152,7 @@ class PackageArchiveInspector {
 
 		// 3. Open ZIP archive in read-only mode.
 		$zip   = new ZipArchive();
-		$flags = 0;
-		if ( defined( 'ZipArchive::RDONLY' ) ) {
-			$flags = ZipArchive::RDONLY;
-		}
+		$flags = ZipArchive::RDONLY;
 
 		$res = $zip->open( $archive_path, $flags );
 		if ( true !== $res ) {
@@ -151,10 +163,49 @@ class PackageArchiveInspector {
 		}
 
 		try {
-			return $this->verify_zip_contents( $zip, $archive_size, $archive_sha256 );
+			$verification_result = $this->verify_zip_contents( $zip, $archive_size, $archive_sha256 );
+			if ( ! $verification_result->is_success() ) {
+				return $verification_result;
+			}
 		} finally {
 			$zip->close();
 		}
+
+		// Hook for testing post-ZIP verification mutations.
+		$this->on_after_zip_verification();
+
+		// 4. Verify archive identity stability after ZIP verification.
+		clearstatcache( true, $archive_path );
+		$final_stat = stat( $archive_path );
+		if ( false === $final_stat || ! isset( $final_stat['size'] ) ) {
+			return PackageArchiveInspectionResult::failure(
+				'ARCHIVE_CHANGED_DURING_INSPECTION',
+				'Archive file attributes changed or became unreadable during inspection.'
+			);
+		}
+
+		// Compare file identity properties (size, mtime, dev, ino).
+		if ( (int) $final_stat['size'] !== $archive_size
+			|| $final_stat['mtime'] !== $initial_stat['mtime']
+			|| ( isset( $initial_stat['ino'], $final_stat['ino'] ) && $final_stat['ino'] !== $initial_stat['ino'] )
+			|| ( isset( $initial_stat['dev'], $final_stat['dev'] ) && $final_stat['dev'] !== $initial_stat['dev'] )
+		) {
+			return PackageArchiveInspectionResult::failure(
+				'ARCHIVE_CHANGED_DURING_INSPECTION',
+				'Archive file identity changed during inspection.'
+			);
+		}
+
+		// Re-read digest after ZIP inspection to detect any content alteration.
+		$final_sha256 = $this->compute_file_sha256( $archive_path );
+		if ( null === $final_sha256 || ! hash_equals( $archive_sha256, $final_sha256 ) ) {
+			return PackageArchiveInspectionResult::failure(
+				'ARCHIVE_CHANGED_DURING_INSPECTION',
+				'Archive checksum changed during inspection.'
+			);
+		}
+
+		return $verification_result;
 	}
 
 	/**
@@ -224,6 +275,14 @@ class PackageArchiveInspector {
 				);
 			}
 
+			// Prohibit encryption on any member.
+			if ( isset( $stat['encryption_method'] ) && 0 !== $stat['encryption_method'] ) {
+				return PackageArchiveInspectionResult::failure(
+					'ZIP_ENCRYPTION_PROHIBITED',
+					'Archive member is encrypted, which is prohibited.'
+				);
+			}
+
 			// Prohibit directory members.
 			if ( str_ends_with( $name, '/' ) ) {
 				return PackageArchiveInspectionResult::failure(
@@ -232,7 +291,7 @@ class PackageArchiveInspector {
 				);
 			}
 
-			// Check external attributes.
+			// Check external attributes and host OS.
 			$opsys = 0;
 			$attr  = 0;
 			if ( ! $this->get_member_external_attributes( $zip, $i, $opsys, $attr ) ) {
@@ -242,6 +301,15 @@ class PackageArchiveInspector {
 				);
 			}
 
+			// Require host OS to be UNIX.
+			if ( ZipArchive::OPSYS_UNIX !== $opsys ) {
+				return PackageArchiveInspectionResult::failure(
+					'ZIP_MEMBER_METADATA_MISMATCH',
+					'Archive member does not have UNIX host OS attributes.'
+				);
+			}
+
+			// Check external attributes for UNIX symlinks or non-regular files.
 			$file_type = ( $attr >> 16 ) & 0170000;
 			if ( 0120000 === $file_type ) {
 				return PackageArchiveInspectionResult::failure(
@@ -253,6 +321,14 @@ class PackageArchiveInspector {
 				return PackageArchiveInspectionResult::failure(
 					'ZIP_NONREGULAR_MEMBER_PROHIBITED',
 					'Archive contains non-regular members.'
+				);
+			}
+
+			// Enforce exact canonical deterministic UNIX file permissions (0100644 << 16).
+			if ( self::DETERMINISTIC_REGULAR_FILE_ATTR !== $attr ) {
+				return PackageArchiveInspectionResult::failure(
+					'ZIP_MEMBER_METADATA_MISMATCH',
+					'Archive member does not have canonical deterministic file attributes.'
 				);
 			}
 
@@ -539,17 +615,16 @@ class PackageArchiveInspector {
 	 * @return string|null SHA-256 digest or null on error.
 	 */
 	private function compute_file_sha256( $path ) {
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
-		$handle = fopen( $path, 'rb' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen, WordPress.PHP.NoSilencedErrors.Discouraged
+		$handle = @fopen( $path, 'rb' );
 		if ( ! is_resource( $handle ) ) {
 			return null;
 		}
 
 		$hash_ctx = hash_init( 'sha256' );
 		while ( ! feof( $handle ) ) {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread
-			$chunk = fread( $handle, self::CHUNK_SIZE );
-			if ( false === $chunk ) {
+			$chunk = $this->read_stream_chunk( $handle, self::CHUNK_SIZE );
+			if ( false === $chunk || ( '' === $chunk && ! feof( $handle ) ) ) {
 				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $handle );
 				return null;
@@ -560,6 +635,36 @@ class PackageArchiveInspector {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		fclose( $handle );
 		return hash_final( $hash_ctx );
+	}
+
+	/**
+	 * Read a chunk from a stream handle.
+	 *
+	 * @param resource $handle     Stream handle.
+	 * @param int      $chunk_size Chunk size.
+	 * @return string|false String or false on error.
+	 */
+	protected function read_stream_chunk( $handle, $chunk_size ) {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread
+		return fread( $handle, $chunk_size );
+	}
+
+	/**
+	 * Hook called after ZIP contents verification for testing TOCTOU mutations.
+	 *
+	 * @return void
+	 */
+	protected function on_after_zip_verification() {
+		// No-op in production.
+	}
+
+	/**
+	 * Check if ZipArchive::RDONLY capability is available.
+	 *
+	 * @return bool True if available, false otherwise.
+	 */
+	protected function is_zip_readonly_available() {
+		return defined( 'ZipArchive::RDONLY' );
 	}
 
 	/**

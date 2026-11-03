@@ -860,4 +860,253 @@ class PackageArchiveInspectorUnitTest extends TestCase {
 			$this->assertSame( $mode, $result->get_manifest()->get_mode() );
 		}
 	}
+
+	/**
+	 * Test that inspect fails when ZipArchive::RDONLY capability is unavailable.
+	 */
+	public function test_inspect_fails_when_zip_readonly_capability_unavailable() {
+		$zip_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'dummy_rdonly.zip';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+		file_put_contents( $zip_path, 'PKfake' );
+
+		$inspector = new class() extends PackageArchiveInspector {
+			/**
+			 * Stub ZipArchive::RDONLY capability.
+			 *
+			 * @return bool False.
+			 */
+			protected function is_zip_readonly_available() {
+				return false;
+			}
+		};
+
+		$result = $inspector->inspect( $zip_path );
+		$this->assertFalse( $result->is_success() );
+		$this->assertSame( 'ZIP_READONLY_UNAVAILABLE', $result->get_error_code() );
+	}
+
+	/**
+	 * Test that inspect fails if a member has non-UNIX OS system.
+	 */
+	public function test_inspect_fails_when_member_opsys_is_not_unix() {
+		$zip_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'opsys_dos.zip';
+
+		$zip = new ZipArchive();
+		$zip->open( $zip_path, ZipArchive::CREATE | ZipArchive::OVERWRITE );
+		$manifest_raw = '{"format_version":"1.0","mode":"standalone_to_subsite","source":{"is_multisite":false,"site_id":1,"base_prefix":"wp_"},"entries":[{"path":"uploads/a.png","size":4,"sha256":"' . hash( 'sha256', 'data' ) . '","type":"regular"}]}';
+
+		$zip->addFromString( 'manifest.json', $manifest_raw );
+		$zip->setMtimeName( 'manifest.json', PackageArchiveInspector::DETERMINISTIC_MTIME );
+		$zip->setCompressionName( 'manifest.json', ZipArchive::CM_STORE );
+		$zip->setExternalAttributesName( 'manifest.json', ZipArchive::OPSYS_UNIX, PackageArchiveInspector::DETERMINISTIC_REGULAR_FILE_ATTR );
+
+		$zip->addFromString( 'uploads/a.png', 'data' );
+		$zip->setMtimeName( 'uploads/a.png', PackageArchiveInspector::DETERMINISTIC_MTIME );
+		$zip->setCompressionName( 'uploads/a.png', ZipArchive::CM_STORE );
+		// Tamper host OS to DOS instead of UNIX.
+		$zip->setExternalAttributesName( 'uploads/a.png', ZipArchive::OPSYS_DOS, 0x20 );
+		$zip->close();
+
+		$inspector = new PackageArchiveInspector();
+		$result    = $inspector->inspect( $zip_path );
+
+		$this->assertFalse( $result->is_success() );
+		$this->assertSame( 'ZIP_MEMBER_METADATA_MISMATCH', $result->get_error_code() );
+	}
+
+	/**
+	 * Test that inspect fails if a member has non-canonical external attributes.
+	 */
+	public function test_inspect_fails_when_member_external_attributes_tampered() {
+		$zip_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'tampered_attrs.zip';
+
+		$zip = new ZipArchive();
+		$zip->open( $zip_path, ZipArchive::CREATE | ZipArchive::OVERWRITE );
+		$manifest_raw = '{"format_version":"1.0","mode":"standalone_to_subsite","source":{"is_multisite":false,"site_id":1,"base_prefix":"wp_"},"entries":[{"path":"uploads/a.png","size":4,"sha256":"' . hash( 'sha256', 'data' ) . '","type":"regular"}]}';
+
+		$zip->addFromString( 'manifest.json', $manifest_raw );
+		$zip->setMtimeName( 'manifest.json', PackageArchiveInspector::DETERMINISTIC_MTIME );
+		$zip->setCompressionName( 'manifest.json', ZipArchive::CM_STORE );
+		$zip->setExternalAttributesName( 'manifest.json', ZipArchive::OPSYS_UNIX, PackageArchiveInspector::DETERMINISTIC_REGULAR_FILE_ATTR );
+
+		$zip->addFromString( 'uploads/a.png', 'data' );
+		$zip->setMtimeName( 'uploads/a.png', PackageArchiveInspector::DETERMINISTIC_MTIME );
+		$zip->setCompressionName( 'uploads/a.png', ZipArchive::CM_STORE );
+		// Tamper permission bits to 0777 instead of 0644.
+		$zip->setExternalAttributesName( 'uploads/a.png', ZipArchive::OPSYS_UNIX, 0100777 << 16 );
+		$zip->close();
+
+		$inspector = new PackageArchiveInspector();
+		$result    = $inspector->inspect( $zip_path );
+
+		$this->assertFalse( $result->is_success() );
+		$this->assertSame( 'ZIP_MEMBER_METADATA_MISMATCH', $result->get_error_code() );
+	}
+
+	/**
+	 * Test that inspect fails if an archive member is encrypted.
+	 */
+	public function test_inspect_fails_when_member_is_encrypted() {
+		$zip_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'encrypted.zip';
+
+		$zip = new ZipArchive();
+		$zip->open( $zip_path, ZipArchive::CREATE | ZipArchive::OVERWRITE );
+		$zip->setPassword( 'secret' );
+		$manifest_raw = '{"format_version":"1.0","mode":"standalone_to_subsite","source":{"is_multisite":false,"site_id":1,"base_prefix":"wp_"},"entries":[{"path":"uploads/a.png","size":4,"sha256":"' . hash( 'sha256', 'data' ) . '","type":"regular"}]}';
+
+		$zip->addFromString( 'manifest.json', $manifest_raw );
+		$zip->setMtimeName( 'manifest.json', PackageArchiveInspector::DETERMINISTIC_MTIME );
+		$zip->setCompressionName( 'manifest.json', ZipArchive::CM_STORE );
+		$zip->setExternalAttributesName( 'manifest.json', ZipArchive::OPSYS_UNIX, PackageArchiveInspector::DETERMINISTIC_REGULAR_FILE_ATTR );
+
+		$zip->addFromString( 'uploads/a.png', 'data' );
+		$zip->setMtimeName( 'uploads/a.png', PackageArchiveInspector::DETERMINISTIC_MTIME );
+		$zip->setCompressionName( 'uploads/a.png', ZipArchive::CM_STORE );
+		$zip->setExternalAttributesName( 'uploads/a.png', ZipArchive::OPSYS_UNIX, PackageArchiveInspector::DETERMINISTIC_REGULAR_FILE_ATTR );
+		if ( defined( 'ZipArchive::EM_AES_128' ) ) {
+			$zip->setEncryptionName( 'uploads/a.png', ZipArchive::EM_AES_128 );
+		}
+		$zip->close();
+
+		$inspector = new PackageArchiveInspector();
+		$result    = $inspector->inspect( $zip_path );
+
+		$this->assertFalse( $result->is_success() );
+		$this->assertSame( 'ZIP_ENCRYPTION_PROHIBITED', $result->get_error_code() );
+	}
+
+	/**
+	 * Test that inspect fails if the archive file changes during inspection.
+	 */
+	public function test_inspect_fails_when_archive_mutates_during_inspection() {
+		$zip_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'mutating.zip';
+		$payloads = array( 'uploads/a.png' => 'data' );
+		$this->create_synthetic_archive( $zip_path, null, $payloads );
+
+		$inspector = new class( $zip_path ) extends PackageArchiveInspector {
+			/**
+			 * Path to target file.
+			 *
+			 * @var string
+			 */
+			private $target_path;
+
+			/**
+			 * Constructor.
+			 *
+			 * @param string $target_path Target path.
+			 */
+			public function __construct( $target_path ) {
+				$this->target_path = $target_path;
+			}
+
+			/**
+			 * Hook after ZIP verification.
+			 *
+			 * @return void
+			 */
+			protected function on_after_zip_verification() {
+				// Mutate file bytes after ZIP verification before post-read hash.
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+				file_put_contents( $this->target_path, 'APPENDED_BYTES', FILE_APPEND );
+			}
+		};
+
+		$result = $inspector->inspect( $zip_path );
+		$this->assertFalse( $result->is_success() );
+		$this->assertSame( 'ARCHIVE_CHANGED_DURING_INSPECTION', $result->get_error_code() );
+	}
+
+	/**
+	 * Test that compute_file_sha256 fails closed if stream read stalls.
+	 */
+	public function test_compute_file_sha256_fails_closed_on_read_stall() {
+		$zip_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'stall.zip';
+		$payloads = array( 'uploads/a.png' => 'data' );
+		$this->create_synthetic_archive( $zip_path, null, $payloads );
+
+		$inspector = new class() extends PackageArchiveInspector {
+			/**
+			 * Simulate read chunk.
+			 *
+			 * @param resource $handle     Stream handle.
+			 * @param int      $chunk_size Chunk size.
+			 * @return string
+			 */
+			protected function read_stream_chunk( $handle, $chunk_size ) {
+				// Simulate read stall: empty string returned without feof.
+				return '';
+			}
+		};
+
+		$result = $inspector->inspect( $zip_path );
+		$this->assertFalse( $result->is_success() );
+		$this->assertSame( 'ARCHIVE_READ_ERROR', $result->get_error_code() );
+	}
+
+	/**
+	 * Test genuine writer-to-inspector compatibility using PackageArchiveWriter.
+	 */
+	public function test_genuine_writer_to_inspector_compatibility() {
+		$destination_zip = $this->temp_dir . DIRECTORY_SEPARATOR . 'writer_output.zip';
+		$staging_dir     = $this->temp_dir . DIRECTORY_SEPARATOR . 'writer_staging';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
+		mkdir( $staging_dir, 0700, true );
+
+		$content  = 'Sample SQL database dump for writer-to-inspector integration.';
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'base_prefix'  => 'wp_',
+			),
+			array(
+				array(
+					'path'   => 'database/posts.sql',
+					'size'   => strlen( $content ),
+					'sha256' => hash( 'sha256', $content ),
+					'type'   => 'regular',
+				),
+			)
+		);
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$stream = fopen( 'php://temp', 'r+' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+		fwrite( $stream, $content );
+		rewind( $stream );
+
+		// Use PackageArchiveWriter (injecting is_windows_platform => false if testing on Windows host).
+		$writer = new class() extends \SiteConvoy\Package\PackageArchiveWriter {
+			/**
+			 * Stub is_windows_platform.
+			 *
+			 * @return bool False.
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
+		};
+
+		$write_result = $writer->write(
+			$manifest,
+			array( 'database/posts.sql' => $stream ),
+			$destination_zip,
+			$staging_dir
+		);
+
+		$this->assertTrue( $write_result->is_success(), 'Writer must succeed: ' . wp_json_encode( $write_result->get_errors() ) );
+		$this->assertFileExists( $destination_zip );
+
+		// Now pass the writer-generated archive into the independent inspector.
+		$inspector      = new PackageArchiveInspector();
+		$inspect_result = $inspector->inspect( $destination_zip );
+
+		$this->assertTrue( $inspect_result->is_success(), 'Inspector must succeed on writer output: ' . $inspect_result->get_error_message() );
+		$this->assertSame( 1, $inspect_result->get_member_count() );
+		$this->assertSame( $write_result->get_archive_size(), $inspect_result->get_archive_size() );
+		$this->assertSame( $write_result->get_archive_sha256(), $inspect_result->get_archive_sha256() );
+		$this->assertSame( $manifest->get_mode(), $inspect_result->get_manifest()->get_mode() );
+	}
 }

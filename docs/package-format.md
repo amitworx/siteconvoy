@@ -160,28 +160,30 @@ Entries in `PackageManifest` are sorted canonically by `path` using standard byt
 `SiteConvoy\Package\PackageArchiveInspector` implements SiteConvoy's independent, read-only inspection and verification gateway for incoming v1 ZIP migration packages:
 
 ### Key Design & Safety Invariants
-1. **Read-Only Non-Destructive Inspection**:
-   - Accepts a local regular file path and inspects the archive strictly read-only (`ZipArchive::RDONLY` flag where available).
+1. **Read-Only Non-Destructive Inspection & Explicit RDONLY Capability**:
+   - Accepts a local regular file path and requires an explicit, verified `ZipArchive::RDONLY` capability. Fails closed upfront with `ZIP_READONLY_UNAVAILABLE` if the runtime cannot guarantee strictly read-only ZIP operations; never falls back to zero-flag open.
    - Never writes to the local filesystem, extracts files (`extractTo()`), creates temporary staging workspaces, modifies file permissions, or deletes files.
    - Zero persistence side-effects: no options, posts, or database tables are queried or modified.
 2. **Path and Platform Safety**:
-   - Inputs must be ordinary regular files. Rejects directories, devices, stream wrappers (`php://`, `phar://`, `file://`), symbolic link leaves, and paths with symlinked ancestors.
-   - Unlike `PackageArchiveWriter` which fails closed on Windows due to POSIX permissions requirements, `PackageArchiveInspector` is fully supported on Windows because it performs purely read-only operations and does not create new files.
+   - Inputs must be ordinary regular files with positive size (`INVALID_ARCHIVE_SIZE`). Rejects directories, devices, stream wrappers (`php://`, `phar://`, `file://`), symbolic link leaves, and paths with symlinked ancestors.
+   - Unlike `PackageArchiveWriter` which fails closed on Windows due to POSIX permissions requirements, `PackageArchiveInspector` is fully supported on Windows when `ZipArchive::RDONLY` is available because it performs purely read-only operations and does not create new files.
 3. **Structure & Member Verification**:
    - Enforces two-pass enumeration: first checks every member name for duplicates (`ZIP_DUPLICATE_MEMBER`) to prevent ZIP duplicate-entry alias attacks before opening any member streams.
    - Exactly one `manifest.json` and declared payload entries under `database/`, `uploads/`, or `assets/` must be present. Rejects missing, unmanifested extra, directory (`/`), symbolic link (`0120000`), or non-regular file members.
    - Enforces canonical member sort order: byte-sorted matching `manifest.json` and declared entries.
-   - Verifies deterministic fixed mtime (`1767225600`), STORE compression (`ZipArchive::CM_STORE`), and regular UNIX attributes (`0100644 << 16`).
+   - Verifies deterministic fixed mtime (`1767225600`), STORE compression (`ZipArchive::CM_STORE`), exact UNIX host OS (`ZipArchive::OPSYS_UNIX`), and exact canonical UNIX regular file attributes (`0100644 << 16` / `020151000000`), failing with `ZIP_MEMBER_METADATA_MISMATCH` if altered.
+   - Strictly prohibits encrypted members (`ZIP_ENCRYPTION_PROHIBITED`).
 4. **Manifest Schema & Canonical Byte Equivalence**:
    - Manifest size is bounded by the metadata safety limit (`2 MiB`, `MAX_MANIFEST_SIZE`) to prevent memory exhaustion attacks.
    - Strictly validates JSON syntax and rejects duplicate JSON object keys (`MANIFEST_DUPLICATE_KEY`).
    - Distinguishes JSON objects from arrays (ensuring `entries` is a JSON array).
    - Validates schema and topology constraints via `PackageManifest::from_array()`.
    - Compares raw manifest bytes byte-for-byte against deterministic canonical serialization (`JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE`), rejecting non-canonical formatting, whitespace, or key ordering.
-5. **Bounded-Memory Stream Verification**:
-   - Each payload member stream is read incrementally in 64 KB chunks, calculating SHA-256 and byte count.
+5. **Bounded-Memory Stream Verification & File Identity Stability**:
+   - Each payload member stream is read incrementally in 64 KB chunks, calculating SHA-256 and byte count. Stalled reads or I/O failures fail closed (`ARCHIVE_READ_ERROR`, `ZIP_MEMBER_READ_ERROR`).
    - Memory consumption scales with chunk size + bounded manifest metadata, never with payload size.
-   - Total archive size and SHA-256 checksum are computed and returned in `PackageArchiveInspectionResult`.
+   - Whole-file SHA-256 digest and file attributes (`size`, `mtime`, `dev`, `ino`) are snapshotted prior to ZIP opening and independently re-verified after ZIP inspection. If file attributes or file digest mutate during inspection, fails closed with `ARCHIVE_CHANGED_DURING_INSPECTION`.
+   - Returns immutable `PackageArchiveInspectionResult`.
 6. **Authentication vs Integrity Boundary**:
    - Inspection proves format conformity and internal SHA-256 integrity only. It does **not** assert package authenticity, authorization, or trust.
 

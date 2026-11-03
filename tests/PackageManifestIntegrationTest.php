@@ -274,4 +274,89 @@ class PackageManifestIntegrationTest extends WP_UnitTestCase {
 		$this->assertSame( $initial_options_count, $final_options_count, 'No options may be written during archive inspection.' );
 		$this->assertSame( $initial_posts_count, $final_posts_count, 'No posts may be created during archive inspection.' );
 	}
+
+	/**
+	 * Test genuine writer-to-inspector compatibility in WordPress integration runtime.
+	 */
+	public function test_genuine_writer_to_inspector_compatibility_in_wordpress() {
+		global $wpdb;
+
+		$initial_options_count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->options}" );
+		$initial_posts_count   = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->posts}" );
+
+		$temp_dir = sys_get_temp_dir() . '/sc_wp_wr_insp_' . uniqid();
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
+		mkdir( $temp_dir, 0777, true );
+
+		$destination_zip = $temp_dir . '/writer_output.zip';
+		$staging_dir     = $temp_dir . '/staging';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
+		mkdir( $staging_dir, 0777, true );
+
+		$content  = 'Synthetic SQL database dump for writer-to-inspector integration.';
+		$manifest = new PackageManifest(
+			MigrationMode::STANDALONE_TO_SUBSITE,
+			array(
+				'is_multisite' => false,
+				'site_id'      => 1,
+				'network_id'   => null,
+				'base_prefix'  => $wpdb->base_prefix,
+			),
+			array(
+				array(
+					'path'   => 'database/posts.sql',
+					'size'   => strlen( $content ),
+					'sha256' => hash( 'sha256', $content ),
+					'type'   => 'regular',
+				),
+			)
+		);
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$stream = fopen( 'php://temp', 'r+' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+		fwrite( $stream, $content );
+		rewind( $stream );
+
+		$writer       = new PackageArchiveWriter();
+		$write_result = $writer->write(
+			$manifest,
+			array( 'database/posts.sql' => $stream ),
+			$destination_zip,
+			$staging_dir
+		);
+
+		$this->assertTrue( $write_result->is_success(), 'Writer must succeed: ' . wp_json_encode( $write_result->get_errors() ) );
+		$this->assertFileExists( $destination_zip );
+
+		$inspector      = new PackageArchiveInspector();
+		$inspect_result = $inspector->inspect( $destination_zip );
+
+		$this->assertTrue( $inspect_result->is_success(), 'Inspector must succeed: ' . $inspect_result->get_error_message() );
+		$this->assertSame( 1, $inspect_result->get_member_count() );
+		$this->assertSame( $write_result->get_archive_size(), $inspect_result->get_archive_size() );
+		$this->assertSame( $write_result->get_archive_sha256(), $inspect_result->get_archive_sha256() );
+		$this->assertSame( $manifest->get_mode(), $inspect_result->get_manifest()->get_mode() );
+
+		// Clean up files.
+		if ( file_exists( $destination_zip ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_unlink, WordPress.WP.AlternativeFunctions.unlink_unlink
+			unlink( $destination_zip );
+		}
+		if ( is_dir( $staging_dir ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
+			rmdir( $staging_dir );
+		}
+		if ( is_dir( $temp_dir ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
+			rmdir( $temp_dir );
+		}
+
+		// Assert zero database modifications.
+		$final_options_count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->options}" );
+		$final_posts_count   = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->posts}" );
+
+		$this->assertSame( $initial_options_count, $final_options_count, 'No options may be written.' );
+		$this->assertSame( $initial_posts_count, $final_posts_count, 'No posts may be created.' );
+	}
 }
