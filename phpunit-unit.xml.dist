@@ -23,6 +23,7 @@
             <file>./tests/PackageManifestUnitTest.php</file>
             <file>./tests/PackageArchiveWriterUnitTest.php</file>
             <file>./tests/PackageArchiveInspectorUnitTest.php</file>
+            <file>./tests/PackageArchiveStagerUnitTest.php</file>
         </testsuite>
     </testsuites>
 </phpunit>
