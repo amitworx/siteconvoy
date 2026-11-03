@@ -976,6 +976,66 @@ class PackageArchiveInspectorUnitTest extends TestCase {
 	}
 
 	/**
+	 * Test that inspect fails closed when member encryption metadata is missing from stat.
+	 */
+	public function test_inspect_fails_when_member_encryption_metadata_missing() {
+		$zip_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'missing_enc_meta.zip';
+		$payloads = array( 'uploads/a.png' => 'data' );
+		$this->create_synthetic_archive( $zip_path, null, $payloads );
+
+		$inspector = new class() extends PackageArchiveInspector {
+			/**
+			 * Stub stat_member to remove encryption_method.
+			 *
+			 * @param ZipArchive $zip   Zip instance.
+			 * @param int        $index Member index.
+			 * @return array<string, mixed>|false
+			 */
+			protected function stat_member( ZipArchive $zip, $index ) {
+				$stat = parent::stat_member( $zip, $index );
+				if ( is_array( $stat ) && array_key_exists( 'encryption_method', $stat ) ) {
+					unset( $stat['encryption_method'] );
+				}
+				return $stat;
+			}
+		};
+
+		$result = $inspector->inspect( $zip_path );
+		$this->assertFalse( $result->is_success() );
+		$this->assertSame( 'ZIP_ENCRYPTION_UNKNOWN', $result->get_error_code() );
+	}
+
+	/**
+	 * Test that inspect fails closed when member encryption metadata is not an integer.
+	 */
+	public function test_inspect_fails_when_member_encryption_metadata_not_integer() {
+		$zip_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'non_int_enc_meta.zip';
+		$payloads = array( 'uploads/a.png' => 'data' );
+		$this->create_synthetic_archive( $zip_path, null, $payloads );
+
+		$inspector = new class() extends PackageArchiveInspector {
+			/**
+			 * Stub stat_member with non-integer encryption_method.
+			 *
+			 * @param ZipArchive $zip   Zip instance.
+			 * @param int        $index Member index.
+			 * @return array<string, mixed>|false
+			 */
+			protected function stat_member( ZipArchive $zip, $index ) {
+				$stat = parent::stat_member( $zip, $index );
+				if ( is_array( $stat ) ) {
+					$stat['encryption_method'] = 'NONE';
+				}
+				return $stat;
+			}
+		};
+
+		$result = $inspector->inspect( $zip_path );
+		$this->assertFalse( $result->is_success() );
+		$this->assertSame( 'ZIP_ENCRYPTION_UNKNOWN', $result->get_error_code() );
+	}
+
+	/**
 	 * Test that inspect fails if the archive file changes during inspection.
 	 */
 	public function test_inspect_fails_when_archive_mutates_during_inspection() {
@@ -1048,6 +1108,10 @@ class PackageArchiveInspectorUnitTest extends TestCase {
 	 * Test genuine writer-to-inspector compatibility using PackageArchiveWriter.
 	 */
 	public function test_genuine_writer_to_inspector_compatibility() {
+		if ( 'WIN' === strtoupper( substr( PHP_OS, 0, 3 ) ) ) {
+			$this->markTestSkipped( 'PackageArchiveWriter is intentionally disabled on Windows (fail-closed permissions policy).' );
+		}
+
 		$destination_zip = $this->temp_dir . DIRECTORY_SEPARATOR . 'writer_output.zip';
 		$staging_dir     = $this->temp_dir . DIRECTORY_SEPARATOR . 'writer_staging';
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
@@ -1077,18 +1141,8 @@ class PackageArchiveInspectorUnitTest extends TestCase {
 		fwrite( $stream, $content );
 		rewind( $stream );
 
-		// Use PackageArchiveWriter (injecting is_windows_platform => false if testing on Windows host).
-		$writer = new class() extends \SiteConvoy\Package\PackageArchiveWriter {
-			/**
-			 * Stub is_windows_platform.
-			 *
-			 * @return bool False.
-			 */
-			protected function is_windows_platform() {
-				return false;
-			}
-		};
-
+		// Use unmodified production PackageArchiveWriter.
+		$writer       = new \SiteConvoy\Package\PackageArchiveWriter();
 		$write_result = $writer->write(
 			$manifest,
 			array( 'database/posts.sql' => $stream ),

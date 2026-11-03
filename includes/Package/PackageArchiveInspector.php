@@ -233,7 +233,7 @@ class PackageArchiveInspector {
 		$manifest_index = null;
 
 		for ( $i = 0; $i < $num_files; $i++ ) {
-			$stat = $zip->statIndex( $i );
+			$stat = $this->stat_member( $zip, $i );
 			if ( false === $stat || ! isset( $stat['name'] ) ) {
 				return PackageArchiveInspectionResult::failure(
 					'ZIP_STAT_FAILED',
@@ -256,7 +256,13 @@ class PackageArchiveInspector {
 
 		// Pass 2: Verify metadata, attributes, and path validity.
 		for ( $i = 0; $i < $num_files; $i++ ) {
-			$stat = $zip->statIndex( $i );
+			$stat = $this->stat_member( $zip, $i );
+			if ( false === $stat || ! isset( $stat['name'] ) ) {
+				return PackageArchiveInspectionResult::failure(
+					'ZIP_STAT_FAILED',
+					'Failed to stat member in archive.'
+				);
+			}
 			$name = $stat['name'];
 
 			// Verify deterministic timestamp.
@@ -275,8 +281,15 @@ class PackageArchiveInspector {
 				);
 			}
 
-			// Prohibit encryption on any member.
-			if ( isset( $stat['encryption_method'] ) && 0 !== $stat['encryption_method'] ) {
+			// Require verifiable encryption metadata: must exist and be integer EM_NONE (0).
+			if ( ! array_key_exists( 'encryption_method', $stat ) || ! is_int( $stat['encryption_method'] ) ) {
+				return PackageArchiveInspectionResult::failure(
+					'ZIP_ENCRYPTION_UNKNOWN',
+					'Archive member encryption status could not be verified.'
+				);
+			}
+
+			if ( ZipArchive::EM_NONE !== $stat['encryption_method'] ) {
 				return PackageArchiveInspectionResult::failure(
 					'ZIP_ENCRYPTION_PROHIBITED',
 					'Archive member is encrypted, which is prohibited.'
@@ -354,7 +367,7 @@ class PackageArchiveInspector {
 		}
 
 		// Read manifest.json stream within size limit.
-		$manifest_stat = $zip->statIndex( $manifest_index );
+		$manifest_stat = $this->stat_member( $zip, $manifest_index );
 		if ( isset( $manifest_stat['size'] ) && $manifest_stat['size'] > self::MAX_MANIFEST_SIZE ) {
 			return PackageArchiveInspectionResult::failure(
 				'MANIFEST_EXCEEDS_SIZE_LIMIT',
@@ -705,6 +718,17 @@ class PackageArchiveInspector {
 	 */
 	protected function get_member_external_attributes( ZipArchive $zip, $index, &$opsys, &$attr ) {
 		return $zip->getExternalAttributesIndex( $index, $opsys, $attr );
+	}
+
+	/**
+	 * Stat member by index.
+	 *
+	 * @param ZipArchive $zip   ZipArchive instance.
+	 * @param int        $index Member index.
+	 * @return array<string, mixed>|false Stat array or false.
+	 */
+	protected function stat_member( ZipArchive $zip, $index ) {
+		return $zip->statIndex( $index );
 	}
 
 	/**

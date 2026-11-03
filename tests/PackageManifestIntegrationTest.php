@@ -279,6 +279,10 @@ class PackageManifestIntegrationTest extends WP_UnitTestCase {
 	 * Test genuine writer-to-inspector compatibility in WordPress integration runtime.
 	 */
 	public function test_genuine_writer_to_inspector_compatibility_in_wordpress() {
+		if ( 'WIN' === strtoupper( substr( PHP_OS, 0, 3 ) ) ) {
+			$this->markTestSkipped( 'PackageArchiveWriter is intentionally disabled on Windows (fail-closed permissions policy).' );
+		}
+
 		global $wpdb;
 
 		$initial_options_count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->options}" );
