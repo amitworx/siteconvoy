@@ -273,7 +273,14 @@ class PackageArchiveStager {
 
 		// Enforce and verify 0700 permissions explicitly regardless of process umask.
 		if ( ! $this->enforce_directory_mode( $op_subdir, 0700 ) ) {
-			$this->cleanup_staging_artifacts( $created_files, $created_dirs, $op_subdir );
+			$cleanup_ok = $this->cleanup_staging_artifacts( $created_files, $created_dirs, $op_subdir );
+			if ( ! $cleanup_ok ) {
+				return PackageArchiveStagingResult::failure(
+					'MANUAL_RECOVERY_REQUIRED',
+					'Failed to enforce 0700 permissions on operation root and automated cleanup could not be fully verified.',
+					(string) $op_subdir
+				);
+			}
 			return PackageArchiveStagingResult::failure(
 				'PERMISSIONS_ENFORCEMENT_FAILED',
 				'Failed to enforce 0700 permissions on operation root.'
@@ -702,10 +709,11 @@ class PackageArchiveStager {
 				if ( ! @mkdir( $current, 0700 ) && ! is_dir( $current ) ) {
 					return false;
 				}
+				// Register directory immediately upon creation before permission enforcement.
+				$created_dirs[] = $current;
 				if ( ! $this->enforce_directory_mode( $current, 0700 ) ) {
 					return false;
 				}
-				$created_dirs[] = $current;
 			}
 		}
 
@@ -753,20 +761,32 @@ class PackageArchiveStager {
 	}
 
 	/**
+	 * Check whether staging parent ownership verification capability is available (test seam).
+	 *
+	 * @return bool True if posix ownership functions are available.
+	 */
+	protected function has_ownership_verification_capability() {
+		return function_exists( 'posix_geteuid' ) && function_exists( 'fileowner' );
+	}
+
+	/**
 	 * Verify effective ownership of staging parent directory (test seam).
 	 *
 	 * @param string $path Staging parent path.
 	 * @return bool
 	 */
 	protected function verify_staging_parent_ownership( $path ) {
-		if ( function_exists( 'posix_geteuid' ) ) {
-			clearstatcache( true, $path );
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fileowner
-			$owner = fileowner( $path );
-			if ( false === $owner || posix_geteuid() !== $owner ) {
-				return false;
-			}
+		if ( ! $this->has_ownership_verification_capability() ) {
+			return false;
 		}
+
+		clearstatcache( true, $path );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fileowner
+		$owner = fileowner( $path );
+		if ( false === $owner || posix_geteuid() !== $owner ) {
+			return false;
+		}
+
 		return true;
 	}
 

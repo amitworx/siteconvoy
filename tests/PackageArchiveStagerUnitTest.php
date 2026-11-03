@@ -319,6 +319,16 @@ class PackageArchiveStagerUnitTest extends TestCase {
 			protected function is_staging_parent_private( $path ) {
 				return true;
 			}
+
+			/**
+			 * Stub staging parent ownership check.
+			 *
+			 * @param string $path Path.
+			 * @return bool
+			 */
+			protected function verify_staging_parent_ownership( $path ) {
+				return true;
+			}
 		};
 
 		// Empty path.
@@ -365,6 +375,16 @@ class PackageArchiveStagerUnitTest extends TestCase {
 			 * @return bool
 			 */
 			protected function is_staging_parent_private( $path ) {
+				return true;
+			}
+
+			/**
+			 * Stub staging parent ownership check.
+			 *
+			 * @param string $path Path.
+			 * @return bool
+			 */
+			protected function verify_staging_parent_ownership( $path ) {
 				return true;
 			}
 		};
@@ -415,6 +435,16 @@ class PackageArchiveStagerUnitTest extends TestCase {
 			protected function is_staging_parent_private( $path ) {
 				return true;
 			}
+
+			/**
+			 * Stub staging parent ownership check.
+			 *
+			 * @param string $path Path.
+			 * @return bool
+			 */
+			protected function verify_staging_parent_ownership( $path ) {
+				return true;
+			}
 		};
 
 		$result = $stager->stage( $archive_path, $staging_dir, str_repeat( '0', 64 ) );
@@ -447,6 +477,16 @@ class PackageArchiveStagerUnitTest extends TestCase {
 			 * @return bool
 			 */
 			protected function is_staging_parent_private( $path ) {
+				return true;
+			}
+
+			/**
+			 * Stub staging parent ownership check.
+			 *
+			 * @param string $path Path.
+			 * @return bool
+			 */
+			protected function verify_staging_parent_ownership( $path ) {
 				return true;
 			}
 		};
@@ -777,6 +817,16 @@ class PackageArchiveStagerUnitTest extends TestCase {
 			}
 
 			/**
+			 * Stub staging parent ownership check.
+			 *
+			 * @param string $path Path.
+			 * @return bool
+			 */
+			protected function verify_staging_parent_ownership( $path ) {
+				return true;
+			}
+
+			/**
 			 * Inject fault during stream copying.
 			 *
 			 * @param resource $source Source stream.
@@ -841,6 +891,16 @@ class PackageArchiveStagerUnitTest extends TestCase {
 			 * @return bool
 			 */
 			protected function is_staging_parent_private( $path ) {
+				return true;
+			}
+
+			/**
+			 * Stub staging parent ownership check.
+			 *
+			 * @param string $path Path.
+			 * @return bool
+			 */
+			protected function verify_staging_parent_ownership( $path ) {
 				return true;
 			}
 
@@ -950,6 +1010,16 @@ class PackageArchiveStagerUnitTest extends TestCase {
 			protected function is_staging_parent_private( $path ) {
 				return true;
 			}
+
+			/**
+			 * Stub staging parent ownership check.
+			 *
+			 * @param string $path Path.
+			 * @return bool
+			 */
+			protected function verify_staging_parent_ownership( $path ) {
+				return true;
+			}
 		};
 
 		// Test with ABSPATH if defined.
@@ -1018,6 +1088,16 @@ class PackageArchiveStagerUnitTest extends TestCase {
 			 * @return bool
 			 */
 			protected function is_staging_parent_private( $path ) {
+				return true;
+			}
+
+			/**
+			 * Stub staging parent ownership check.
+			 *
+			 * @param string $path Path.
+			 * @return bool
+			 */
+			protected function verify_staging_parent_ownership( $path ) {
 				return true;
 			}
 
@@ -1091,6 +1171,16 @@ class PackageArchiveStagerUnitTest extends TestCase {
 			}
 
 			/**
+			 * Stub staging parent ownership check.
+			 *
+			 * @param string $path Path.
+			 * @return bool
+			 */
+			protected function verify_staging_parent_ownership( $path ) {
+				return true;
+			}
+
+			/**
 			 * Hook after payload staging to mutate source archive.
 			 */
 			protected function on_after_payload_staging() {
@@ -1144,6 +1234,16 @@ class PackageArchiveStagerUnitTest extends TestCase {
 			protected function is_staging_parent_private( $path ) {
 				return true;
 			}
+
+			/**
+			 * Stub staging parent ownership check.
+			 *
+			 * @param string $path Path.
+			 * @return bool
+			 */
+			protected function verify_staging_parent_ownership( $path ) {
+				return true;
+			}
 		};
 
 		$mem_before = memory_get_usage( true );
@@ -1157,5 +1257,274 @@ class PackageArchiveStagerUnitTest extends TestCase {
 		// Memory growth during 4MB streaming must be strictly bounded (< 3 MB).
 		$mem_diff = $mem_after - $mem_before;
 		$this->assertLessThan( 3 * 1024 * 1024, $mem_diff, 'Staging large entry must not buffer entirety in memory.' );
+	}
+
+	/**
+	 * Test that when a newly created subdirectory fails directory mode enforcement,
+	 * it is tracked and removed during cleanup, preserving the caller sentinel.
+	 */
+	public function test_newly_created_subdirectory_mode_failure_cleans_up_all_artifacts() {
+		$archive_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'subdir_fail.zip';
+		$staging_dir  = $this->temp_dir . DIRECTORY_SEPARATOR . 'staging';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
+		mkdir( $staging_dir, 0700, true );
+
+		$sentinel = $staging_dir . DIRECTORY_SEPARATOR . 'sentinel.txt';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+		file_put_contents( $sentinel, 'sentinel data' );
+
+		// Archive with a nested entry requiring a subdirectory.
+		$payloads = array( 'database/nested/posts.sql' => 'SELECT 1;' );
+		$this->create_synthetic_archive( $archive_path, null, $payloads );
+		$expected_hash = hash_file( 'sha256', $archive_path );
+
+		$stager = new class() extends PackageArchiveStager {
+			/**
+			 * Stub windows platform check.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
+
+			/**
+			 * Stub staging parent privacy check.
+			 *
+			 * @param string $path Path.
+			 * @return bool
+			 */
+			protected function is_staging_parent_private( $path ) {
+				return true;
+			}
+
+			/**
+			 * Stub staging parent ownership check.
+			 *
+			 * @param string $path Path.
+			 * @return bool
+			 */
+			protected function verify_staging_parent_ownership( $path ) {
+				return true;
+			}
+
+			/**
+			 * Fail directory mode enforcement on subdirectories.
+			 *
+			 * @param string $dir  Directory.
+			 * @param int    $mode Mode.
+			 * @return bool
+			 */
+			protected function enforce_directory_mode( $dir, $mode ) {
+				// Allow operation root to succeed, fail on any created subdirectories.
+				if ( str_contains( basename( $dir ), 'nested' ) ) {
+					return false;
+				}
+				return true;
+			}
+		};
+
+		$result = $stager->stage( $archive_path, $staging_dir, $expected_hash );
+		$this->assertFalse( $result->is_success() );
+		$this->assertSame( 'DIRECTORY_CREATE_FAILED', $result->get_error_code() );
+
+		// Sentinel must be preserved.
+		$this->assertFileExists( $sentinel );
+
+		// All created directories and operation root must be completely removed.
+		$remaining = array_values( array_diff( scandir( $staging_dir ), array( '.', '..' ) ) );
+		$this->assertSame( array( 'sentinel.txt' ), $remaining );
+	}
+
+	/**
+	 * Test that when newly created subdirectory mode fails AND cleanup fails,
+	 * MANUAL_RECOVERY_REQUIRED is returned with the recovery locator.
+	 */
+	public function test_newly_created_subdirectory_mode_failure_returns_manual_recovery_on_failed_cleanup() {
+		$archive_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'subdir_manual.zip';
+		$staging_dir  = $this->temp_dir . DIRECTORY_SEPARATOR . 'staging';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
+		mkdir( $staging_dir, 0700, true );
+
+		$payloads = array( 'database/nested/posts.sql' => 'SELECT 1;' );
+		$this->create_synthetic_archive( $archive_path, null, $payloads );
+		$expected_hash = hash_file( 'sha256', $archive_path );
+
+		$stager = new class() extends PackageArchiveStager {
+			/**
+			 * Stub windows platform check.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
+
+			/**
+			 * Stub staging parent privacy check.
+			 *
+			 * @param string $path Path.
+			 * @return bool
+			 */
+			protected function is_staging_parent_private( $path ) {
+				return true;
+			}
+
+			/**
+			 * Stub staging parent ownership check.
+			 *
+			 * @param string $path Path.
+			 * @return bool
+			 */
+			protected function verify_staging_parent_ownership( $path ) {
+				return true;
+			}
+
+			/**
+			 * Fail directory mode enforcement on nested subdirectory.
+			 *
+			 * @param string $dir  Directory.
+			 * @param int    $mode Mode.
+			 * @return bool
+			 */
+			protected function enforce_directory_mode( $dir, $mode ) {
+				if ( str_contains( basename( $dir ), 'nested' ) ) {
+					return false;
+				}
+				return true;
+			}
+
+			/**
+			 * Fail rmdir during cleanup.
+			 *
+			 * @param string $dir Directory path.
+			 * @return bool
+			 */
+			protected function rmdir_directory( $dir ) {
+				return false;
+			}
+		};
+
+		$result = $stager->stage( $archive_path, $staging_dir, $expected_hash );
+		$this->assertFalse( $result->is_success() );
+		$this->assertSame( 'MANUAL_RECOVERY_REQUIRED', $result->get_error_code() );
+		$this->assertNotEmpty( $result->get_recovery_locator() );
+	}
+
+	/**
+	 * Test that operation root directory mode failure with failed cleanup returns MANUAL_RECOVERY_REQUIRED.
+	 */
+	public function test_operation_root_mode_failure_returns_manual_recovery_when_cleanup_fails() {
+		$archive_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'root_manual.zip';
+		$staging_dir  = $this->temp_dir . DIRECTORY_SEPARATOR . 'staging';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
+		mkdir( $staging_dir, 0700, true );
+
+		$this->create_synthetic_archive( $archive_path, null, array( 'database/schema.sql' => 'SELECT 1;' ) );
+		$expected_hash = hash_file( 'sha256', $archive_path );
+
+		$stager = new class() extends PackageArchiveStager {
+			/**
+			 * Stub windows platform check.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
+
+			/**
+			 * Stub staging parent privacy check.
+			 *
+			 * @param string $path Path.
+			 * @return bool
+			 */
+			protected function is_staging_parent_private( $path ) {
+				return true;
+			}
+
+			/**
+			 * Stub staging parent ownership check.
+			 *
+			 * @param string $path Path.
+			 * @return bool
+			 */
+			protected function verify_staging_parent_ownership( $path ) {
+				return true;
+			}
+
+			/**
+			 * Fail directory mode on root.
+			 *
+			 * @param string $dir  Directory.
+			 * @param int    $mode Mode.
+			 * @return bool
+			 */
+			protected function enforce_directory_mode( $dir, $mode ) {
+				return false;
+			}
+
+			/**
+			 * Fail rmdir during cleanup.
+			 *
+			 * @param string $dir Directory path.
+			 * @return bool
+			 */
+			protected function rmdir_directory( $dir ) {
+				return false;
+			}
+		};
+
+		$result = $stager->stage( $archive_path, $staging_dir, $expected_hash );
+		$this->assertFalse( $result->is_success() );
+		$this->assertSame( 'MANUAL_RECOVERY_REQUIRED', $result->get_error_code() );
+		$this->assertNotEmpty( $result->get_recovery_locator() );
+	}
+
+	/**
+	 * Test that unsupported staging parent ownership verification fails closed.
+	 */
+	public function test_stage_fails_when_staging_parent_ownership_verification_unsupported() {
+		$archive_path = $this->temp_dir . DIRECTORY_SEPARATOR . 'ownership_test.zip';
+		$staging_dir  = $this->temp_dir . DIRECTORY_SEPARATOR . 'staging';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
+		mkdir( $staging_dir, 0700, true );
+
+		$this->create_synthetic_archive( $archive_path, null, array( 'database/schema.sql' => 'SELECT 1;' ) );
+		$expected_hash = hash_file( 'sha256', $archive_path );
+
+		$stager = new class() extends PackageArchiveStager {
+			/**
+			 * Stub windows platform check.
+			 *
+			 * @return bool
+			 */
+			protected function is_windows_platform() {
+				return false;
+			}
+
+			/**
+			 * Stub staging parent privacy check.
+			 *
+			 * @param string $path Path.
+			 * @return bool
+			 */
+			protected function is_staging_parent_private( $path ) {
+				return true;
+			}
+
+			/**
+			 * Simulate unsupported ownership check.
+			 *
+			 * @return bool
+			 */
+			protected function has_ownership_verification_capability() {
+				return false;
+			}
+		};
+
+		$result = $stager->stage( $archive_path, $staging_dir, $expected_hash );
+		$this->assertFalse( $result->is_success() );
+		$this->assertSame( 'STAGING_PARENT_OWNERSHIP_UNVERIFIED', $result->get_error_code() );
 	}
 }
